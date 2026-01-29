@@ -49,66 +49,85 @@ def modal_analysis(
     M: Any,
     structure: "Structure",
     num_modes=6,
+    debug=False,
 ):
-    print("\n" + "="*60)
-    print("[DIAG] MODAL ANALYSIS DIAGNOSTICS")
-    print("="*60)
+    if debug:
+        print("\n" + "="*60)
+        print("[DIAG] MODAL ANALYSIS DIAGNOSTICS")
+        print("="*60)
     
     num_dofs = K.shape[0]
     constrained_dofs = structure.get_constrained_dofs()
     free_dofs = np.setdiff1d(np.arange(num_dofs), constrained_dofs)
     
-    print(f"[DIAG] Total DOFs: {num_dofs}, Free DOFs: {len(free_dofs)}, Constrained DOFs: {len(constrained_dofs)}")
+    if debug:
+        print(f"[DIAG] Total DOFs: {num_dofs}, Free DOFs: {len(free_dofs)}, Constrained DOFs: {len(constrained_dofs)}")
 
     K_free = K[free_dofs, :][:, free_dofs]
     M_free = M[free_dofs, :][:, free_dofs]
     
-    print("\n[DIAG] --- Before regularization ---")
-    _print_matrix_diagnostics(M_free, "M_free (original)")
+    if debug:
+        print("\n[DIAG] --- Before regularization ---")
+        _print_matrix_diagnostics(M_free, "M_free (original)")
 
-    M_free += sparse.eye(M_free.shape[0]) * 1e-9
-    print("\n[DIAG] --- After regularization (1e-9 on diagonal) ---")
-    _print_matrix_diagnostics(M_free, "M_free (regularized)")
-    _print_matrix_diagnostics(K_free, "K_free")
+    m_diag = M_free.diagonal()
+    if np.any(m_diag < 1e-15):
+        M_free += sparse.eye(M_free.shape[0]) * 1e-9
+        if debug:
+            print("\n[DIAG] --- After regularization (1e-9 on diagonal) ---")
+            _print_matrix_diagnostics(M_free, "M_free (regularized)")
+            _print_matrix_diagnostics(K_free, "K_free")
 
     actual_num_modes = min(num_modes, len(free_dofs) - 2)
-    print(f"\n[DIAG] Requested modes: {num_modes}, Actual modes to compute: {actual_num_modes}")
+    if debug:
+        print(f"\n[DIAG] Requested modes: {num_modes}, Actual modes to compute: {actual_num_modes}")
     
-    # Forzar el uso del solver denso para diagnóstico si hay mucha disparidad en la masa
     disparity = M_free.diagonal().max() / (M_free.diagonal().min() + 1e-12)
     
-    if actual_num_modes <= 0 or disparity > 1e7:
-        print(f"[DIAG] Using dense solver (scipy.linalg.eigh) - disparity {disparity:.1e}")
+    if actual_num_modes <= 0 or disparity > 1e12:
+        if debug:
+            print(f"[DIAG] Using dense solver (scipy.linalg.eigh) - disparity {disparity:.1e}")
         actual_num_modes = min(num_modes, len(free_dofs))
-        # eigh es más robusto para matrices con gran rango dinámico
         eigvals, eigvecs_red = scipy.linalg.eigh(K_free.toarray(), M_free.toarray())
         actual_num_modes = min(num_modes, len(eigvals))
         eigvals = eigvals[:actual_num_modes]
         eigvecs_red = eigvecs_red[:, :actual_num_modes]
     else:
-        print(f"[DIAG] Using sparse solver (eigsh) with disparity {disparity:.1e}")
-        # CRITICAL: With sigma=0 (shift-invert mode), eigsh computes eigenvalues of K^(-1)M.
-        # The smallest eigenvalues of Kφ=λMφ become the LARGEST eigenvalues of K^(-1)M.
-        # Therefore, we need which='LM' (largest magnitude) to get the smallest frequencies.
-        eigvals, eigvecs_red = eigsh(K_free, k=actual_num_modes, M=M_free, which='LM', sigma=0)
+        if debug:
+            print(f"[DIAG] Using sparse solver (eigsh) with disparity {disparity:.1e}")
+        try:
+            # Intentar resolver usando el solver sparse de Arpack
+            eigvals, eigvecs_red = eigsh(K_free, k=actual_num_modes, M=M_free, which='LM', sigma=0)
+        except Exception as e:
+            if debug:
+                print(f"[DIAG] eigsh failed: {e}. Falling back to dense solver.")
+            # Fallback a solver denso si eigsh falla (común en mecanismos)
+            eigvals, eigvecs_red = scipy.linalg.eigh(K_free.toarray(), M_free.toarray())
+            actual_num_modes = min(num_modes, len(eigvals))
+            eigvals = eigvals[:actual_num_modes]
+            eigvecs_red = eigvecs_red[:, :actual_num_modes]
 
-    
-    print("\n[DIAG] --- Eigensolution Results ---")
-    _print_eigensolution_diagnostics(eigvals, eigvecs_red)
+    if debug:
+        print("\n[DIAG] --- Eigensolution Results ---")
+        _print_eigensolution_diagnostics(eigvals, eigvecs_red)
 
     mode_shapes = np.zeros((num_dofs, actual_num_modes))
     mode_shapes[free_dofs, :] = eigvecs_red
 
-    print("\n[DIAG] --- Eigenvector Mass Normalization (phi^T M phi = 1) ---")
+    if debug:
+        print("\n[DIAG] --- Eigenvector Mass Normalization (phi^T M phi = 1) ---")
+    
     for i in range(actual_num_modes):
         phi_i = mode_shapes[:, i]
         m_modal = phi_i.T @ M @ phi_i
-        print(f"[DIAG] Mode {i+1}: m_modal before normalization = {m_modal:.6e}")
+        if debug:
+            print(f"[DIAG] Mode {i+1}: m_modal before normalization = {m_modal:.6e}")
         if m_modal > 1e-12:
             mode_shapes[:, i] /= np.sqrt(m_modal)
-            phi_normalized = mode_shapes[:, i]
-            m_modal_check = phi_normalized.T @ M @ phi_normalized
-            print(f"[DIAG] Mode {i+1}: m_modal after normalization = {m_modal_check:.6e}")
+            if debug:
+                phi_normalized = mode_shapes[:, i]
+                m_modal_check = phi_normalized.T @ M @ phi_normalized
+                print(f"[DIAG] Mode {i+1}: m_modal after normalization = {m_modal_check:.6e}")
 
     frequencies = np.sqrt(np.maximum(eigvals, 0)) / (2 * np.pi)
 
@@ -117,14 +136,13 @@ def modal_analysis(
     for j in range(6):
         R[j::6, j] = 1
 
-    # Correct total mass calculation using R^T M R (works for both lumped AND consistent mass)
-    # This is critical: diagonal sum only valid for lumped mass matrices
     total_mass_vector = np.zeros(6)
     for j in range(6):
         Rj = R[:, j]
         total_mass_vector[j] = Rj.T @ M @ Rj
     
-    print(f"[DIAG] total_mass_vector (R^T M R): {total_mass_vector}")
+    if debug:
+        print(f"[DIAG] total_mass_vector (R^T M R): {total_mass_vector}")
 
     L = mode_shapes.T @ M @ R
     effective_modal_mass = L**2

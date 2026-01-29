@@ -125,7 +125,6 @@ class Element:
 
         # Matriz de rotación R (ejes locales como filas)
         R = np.vstack([v_x, v_y, v_z])
-        print(f"DEBUG: Element {self.element_id} R matrix:\n{R}")
 
         self.T = np.zeros((12, 12))
         for i in range(4):
@@ -177,10 +176,11 @@ class Element:
             sigma_bend_z = abs(Mz * y_max / Iz)
             sigma_total = sigma_axial + sigma_bend_y + sigma_bend_z
             
-            # Esfuerzo cortante (Torsión + Cortante directo simplificado)
+            # Esfuerzo cortante (Torsión + Cortante directo con factor de forma para sección rectangular)
+            kappa = 5.0 / 6.0
             tau_torsion = abs(Mx * max(y_max, z_max) / J)
-            tau_vy = abs(Fy / A)
-            tau_vz = abs(Fz / A)
+            tau_vy = kappa * abs(Fy) / A
+            tau_vz = kappa * abs(Fz) / A
             tau_total = tau_torsion + tau_vy + tau_vz
             
             # Von Mises: sqrt(sigma^2 + 3*tau^2)

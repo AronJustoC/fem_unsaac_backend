@@ -281,6 +281,16 @@ def run_static_analysis(structure_data: dict) -> dict:
         reactions_vector = K_pure @ displacements - F_global
         print(f"DEBUG: Max reacción detectada (K_pure @ u - F): {np.max(np.abs(reactions_vector))}")
 
+        # Verificación de equilibrio global
+        total_reactions = np.sum(reactions_vector.reshape(-1, 6), axis=0)
+        total_loads = np.sum(F_global.reshape(-1, 6), axis=0)
+        equilibrium_error = np.abs(total_reactions + total_loads)
+        max_error = np.max(equilibrium_error)
+        if max_error > 1e-3:
+            print(f"⚠️  WARNING: Equilibrium error = {max_error:.2e} (expected ~0)")
+        else:
+            print(f"✓ Equilibrium verified: max error = {max_error:.2e}")
+
         for original_node_id in id_map.keys():
             rep_id = id_map[original_node_id]
             if rep_id in nodes_map_core:
@@ -341,7 +351,7 @@ def run_modal_analysis(structure_data: dict, num_modes: int) -> dict:
         if K_global is None or M_global is None:
             return {"error": "Error al ensamblar las matrices globales."}
 
-        frequencies, modes, mass_participation = modal_analysis(K_global, M_global, structure, num_modes=num_modes)
+        frequencies, modes, mass_participation = modal_analysis(K_global, M_global, structure, num_modes=num_modes, debug=False)
 
         results = {
             "frequencies": _to_list(frequencies),
@@ -391,7 +401,7 @@ def run_harmonic_analysis(request_data: dict) -> dict:
 
         # Calcular amortiguamiento de Rayleigh simplificado
         # Obtenemos la primera frecuencia para calibrar beta (stiffness proportional)
-        freqs, _, _ = modal_analysis(K_global, M_global, structure, num_modes=1)
+        freqs, _, _ = modal_analysis(K_global, M_global, structure, num_modes=1, debug=False)
         if len(freqs) > 0 and freqs[0] > 0:
             omega1 = 2 * np.pi * freqs[0]
             beta = 2 * damping_ratio / omega1
