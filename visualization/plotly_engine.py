@@ -194,8 +194,10 @@ def generate_structure_figure(structure_data, theme="dark"):
         support_data[k]['x'].append(node['coords'][0])
         support_data[k]['y'].append(node['coords'][1])
         support_data[k]['z'].append(node['coords'][2])
-        unique_dofs = sorted(list(set(dofs)), key=lambda x: ['ux', 'uy', 'uz', 'rx', 'ry', 'rz'].index(x) if x in ['ux', 'uy', 'uz', 'rx', 'ry', 'rz'] else 99)
-        support_data[k]['text'].append(f"Nodo {nid_str}<br>{', '.join(unique_dofs)}")
+        unique_dofs = sorted(list(set(dofs)), key=lambda x: ['ux', 'uy', 'uz', 'rx', 'ry', 'rz'].index(
+            x) if x in ['ux', 'uy', 'uz', 'rx', 'ry', 'rz'] else 99)
+        support_data[k]['text'].append(
+            f"Nodo {nid_str}<br>{', '.join(unique_dofs)}")
 
     for k, style in support_styles.items():
         data = support_data[k]
@@ -314,7 +316,8 @@ def generate_structure_figure(structure_data, theme="dark"):
         max_coords = np.max(all_coords, axis=0)
         center = (min_coords + max_coords) / 2
         size = np.max(max_coords - min_coords)
-        if size == 0: size = 1000.0
+        if size == 0:
+            size = 1000.0
         camera_distance = max(size * 1.5, 2.0)
 
         # Smart Ranges para evitar colapso de ejes en 2D/1D y dar aire
@@ -360,9 +363,12 @@ def generate_structure_figure(structure_data, theme="dark"):
         plot_bgcolor=bg_color,
         font=dict(family=font_family, color=text_color),
         scene=dict(
-            xaxis=dict(**axis_config, title=dict(text='X (mm)'), range=rx, autorange=False),
-            yaxis=dict(**axis_config, title=dict(text='Y (mm)'), range=ry, autorange=False),
-            zaxis=dict(**axis_config, title=dict(text='Z (mm)'), range=rz, autorange=False),
+            xaxis=dict(**axis_config, title=dict(text='X (mm)'),
+                       range=rx, autorange=False),
+            yaxis=dict(**axis_config, title=dict(text='Y (mm)'),
+                       range=ry, autorange=False),
+            zaxis=dict(**axis_config, title=dict(text='Z (mm)'),
+                       range=rz, autorange=False),
             aspectmode='data',
             camera=dict(
                 eye=dict(x=1.8, y=1.8, z=1.4),
@@ -433,7 +439,7 @@ def generate_results_figure(structure_data, displacements, scale=1.0, theme="dar
                             orig_color = c
                 except:
                     pass
-                
+
                 trace.update(
                     line=dict(width=2, color=orig_color), opacity=ghost_opacity)
             elif 'markers' in mode:
@@ -598,7 +604,7 @@ def generate_results_figure(structure_data, displacements, scale=1.0, theme="dar
                     {
                         "label": "▶ Play",
                         "method": "animate",
-                         "args": [
+                        "args": [
                             None,
                             {
                                 "frame": {"duration": 50, "redraw": True},
@@ -673,7 +679,7 @@ def generate_results_figure(structure_data, displacements, scale=1.0, theme="dar
             pts_x = [float(v) for v in trace.x if v is not None]
             pts_y = [float(v) for v in trace.y if v is not None]
             pts_z = [float(v) for v in trace.z if v is not None]
-            
+
             if pts_x:
                 min_coords[0] = min(min_coords[0], min(pts_x))
                 max_coords[0] = max(max_coords[0], max(pts_x))
@@ -689,8 +695,9 @@ def generate_results_figure(structure_data, displacements, scale=1.0, theme="dar
 
     def get_extended_range(min_v, max_v):
         span = max_v - min_v
-        if span < 1e-4: span = 100.0  # Rango base si no hay dimensión
-        
+        if span < 1e-4:
+            span = 100.0  # Rango base si no hay dimensión
+
         # Buffer del 40% para asegurar que todo entre con aire
         margin = span * 0.4
         return [min_v - margin, max_v + margin]
@@ -718,9 +725,12 @@ def generate_results_figure(structure_data, displacements, scale=1.0, theme="dar
 
     fig.update_layout(
         scene=dict(
-            xaxis=dict(range=rx, autorange=False, **axis_style, title_text='X (mm)'),
-            yaxis=dict(range=ry, autorange=False, **axis_style, title_text='Y (mm)'),
-            zaxis=dict(range=rz, autorange=False, **axis_style, title_text='Z (mm)'),
+            xaxis=dict(range=rx, autorange=False, **
+                       axis_style, title_text='X (mm)'),
+            yaxis=dict(range=ry, autorange=False, **
+                       axis_style, title_text='Y (mm)'),
+            zaxis=dict(range=rz, autorange=False, **
+                       axis_style, title_text='Z (mm)'),
             aspectmode='data',
             camera=dict(
                 eye=dict(x=1.8, y=1.8, z=1.4),
@@ -738,13 +748,13 @@ def generate_results_figure(structure_data, displacements, scale=1.0, theme="dar
         arr = np.array(u_vals)
         norm_t = np.mean(np.linalg.norm(arr[:, :3], axis=1))
         norm_r = np.mean(np.linalg.norm(arr[:, 3:6], axis=1))
-        
+
         # Factor de escala empírico para comparar m con rad
         # (Una rotación de 1 rad es enorme, una traslación de 1m es enorme)
         # Usamos ratio 1:1 para simplificar, o 1:0.5
-        is_rot = norm_r > norm_t * 0.5 
+        is_rot = norm_r > norm_t * 0.5
         pred = "ROTACIONAL / TORSIÓN" if is_rot else "TRASLACIONAL"
-        
+
         fig.add_annotation(
             text=f"MODO {pred}",
             xref="paper", yref="paper",

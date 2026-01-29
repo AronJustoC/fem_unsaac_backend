@@ -1,11 +1,11 @@
 services:
   - type: web
     name: fem-backend
-    env: python
+    runtime: python
     plan: free
     buildCommand: "./build.sh"
     startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
-    healthCheckPath: /
+    healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -15,8 +15,11 @@ services:
         value: "1"
       - key: MEMORY_LIMIT
         value: "512"
+      - key: PORT
+        value: 10000
     buildFilter:
       paths:
         - requirements.txt
         - build.sh
         - .python-version
+        - Procfile
