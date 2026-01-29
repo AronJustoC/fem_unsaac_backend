@@ -74,6 +74,10 @@ app = FastAPI(title="API de analisis Estructural 3D",
               description="API para realizar analisis estaticos, modales y armonicos de estructuras",
               version="1.0.0")
 
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "service": "fem-backend"}
+
 # ... (rest of middleware)
 app.add_middleware(
     CORSMiddleware,
