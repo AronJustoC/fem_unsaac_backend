@@ -2,73 +2,54 @@ import plotly.graph_objects as go
 import numpy as np
 
 
-def generate_structure_figure(structure_data, theme="dark"):
-    """
-    Genera una figura de Plotly para la estructura con un estilo profesional
-    y adaptativo (Claro/Oscuro).
-    """
-    # Convertir coordenadas de metros a milímetros para visualización
+def get_theme_config(theme="dark"):
+    is_dark = theme == "dark"
+    
+    if is_dark:
+        config = {
+            'bg_color': '#000000',
+            'grid_color': 'rgba(255, 255, 255, 0.15)',
+            'axis_color': '#888888',
+            'text_color': '#ffffff',
+            'label_color': '#cccccc',
+            'node_fill': '#000000',
+            'node_border': '#ffffff',
+            'palette': ['#1e90ff', '#00ff00', '#ffff00', '#ff00ff',
+                       '#00ffff', '#ffa500', '#ffc0cb', '#ffffff'],
+            'grid_bg_color': 'rgba(255,255,255,0.02)',
+            'is_dark': True
+        }
+    else:
+        config = {
+            'bg_color': '#ffffff',
+            'grid_color': 'rgba(0, 0, 0, 0.1)',
+            'axis_color': '#444444',
+            'text_color': '#000000',
+            'label_color': '#333333',
+            'node_fill': '#ffffff',
+            'node_border': '#000000',
+            'palette': ['#1e90ff', '#008000', '#c2a100', '#db2777',
+                       '#009999', '#ea580c', '#db2777', '#000000'],
+            'grid_bg_color': 'rgba(0,0,0,0.02)',
+            'is_dark': False
+        }
+    
+    config['font_family'] = "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
+    return config
+
+
+def process_nodes(structure_data):
     nodes = []
     for n in structure_data.get('nodes', []):
         nodes.append({
             **n,
             'coords': [n['coords'][0] * 1000, n['coords'][1] * 1000, n['coords'][2] * 1000]
         })
+    return nodes
 
-    elements = structure_data.get('elements', [])
-    materials = {m['id']: m for m in structure_data.get('materials', [])}
-    sections = {s['id']: s for s in structure_data.get('sections', [])}
+
+def add_elements_to_figure(fig, elements, nodes, materials, sections, palette):
     node_map = {n['id']: n for n in nodes}
-
-    is_dark = theme == "dark"
-
-    # --- CONFIGURACIÓN DE TEMA ---
-    if is_dark:
-        # Tema Oscuro (Professional Dark / SAP2000 Style)
-        bg_color = '#000000'      # SAP2000 Black
-        grid_color = 'rgba(255, 255, 255, 0.15)'
-        axis_color = '#888888'
-        text_color = '#ffffff'
-        label_color = '#cccccc'
-        node_fill = '#000000'
-        node_border = '#ffffff'
-        # Paleta SAP2000 Estricta
-        palette = ['#1e90ff', '#00ff00', '#ffff00', '#ff00ff',
-                   '#00ffff', '#ffa500', '#ffc0cb', '#ffffff']
-        grid_bg_color = 'rgba(255,255,255,0.02)'
-    else:
-        # Tema Claro (Professional Light / SAP2000 White Style)
-        bg_color = '#ffffff'
-        grid_color = 'rgba(0, 0, 0, 0.1)'
-        axis_color = '#444444'
-        text_color = '#000000'
-        label_color = '#333333'
-        node_fill = '#ffffff'
-        node_border = '#000000'
-        # Paleta SAP2000 Estricta (con ajustes de contraste para fondo claro)
-        palette = ['#1e90ff', '#008000', '#c2a100', '#db2777',
-                   '#009999', '#ea580c', '#db2777', '#000000']
-        grid_bg_color = 'rgba(0,0,0,0.02)'
-
-    font_family = "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-
-    fig = go.Figure()
-
-    # --- GRID PERSONALIZADO ---
-    # Dibujamos un "suelo" de referencia si hay nodos
-    if nodes:
-        all_coords = np.array([n['coords'] for n in nodes])
-        if len(all_coords) > 0:
-            min_x, max_x = np.min(all_coords[:, 0]), np.max(all_coords[:, 0])
-            min_y, max_y = np.min(all_coords[:, 1]), np.max(all_coords[:, 1])
-
-            # Margen del 20%
-            margin_x = max(max_x - min_x, 5.0) * 0.2
-            margin_y = max(max_y - min_y, 5.0) * 0.2
-            pass
-
-    # --- ELEMENTOS ---
-    # Agrupar por sección para asignar colores consistentes
     section_ids = sorted(list(set(el.get('section_id')
                          for el in elements if el.get('section_id') is not None)))
     color_map = {sid: palette[i % len(palette)]
@@ -91,28 +72,23 @@ def generate_structure_figure(structure_data, theme="dark"):
             n2 = node_map.get(el['node_ids'][1])
             if n1 and n2:
                 c1, c2 = n1['coords'], n2['coords']
-                # Construimos líneas con 'None' para separarlas
                 ex.extend([c1[0], c2[0], None])
                 ey.extend([c1[1], c2[1], None])
                 ez.extend([c1[2], c2[2], None])
 
-                # Puntos medios para interactividad
                 mid_x.append((c1[0] + c2[0]) / 2)
                 mid_y.append((c1[1] + c2[1]) / 2)
                 mid_z.append((c1[2] + c2[2]) / 2)
 
                 mat_id = el.get('material_id')
                 mat_name = materials.get(mat_id, {}).get('name', f"M{mat_id}")
-                mid_text.append(f"<b>Elemento {
-                                el['id']}</b><br>Sección: {section_name}<br>Material: {mat_name}")
+                mid_text.append(f"<b>Elemento {el['id']}</b><br>Sección: {section_name}<br>Material: {mat_name}")
 
         if ex:
             color = color_map.get(sid, palette[0])
-            # Trazo de líneas (Elementos)
             fig.add_trace(go.Scatter3d(
                 x=ex, y=ey, z=ez,
                 mode='lines',
-                # Líneas más definidas
                 line=dict(color=color_map[sid], width=5),
                 name=section_name,
                 hoverinfo='text',
@@ -120,11 +96,10 @@ def generate_structure_figure(structure_data, theme="dark"):
                 legendgroup=f'sec_{sid}',
                 showlegend=True
             ))
-            # Puntos invisibles para Hover en elementos
             fig.add_trace(go.Scatter3d(
                 x=mid_x, y=mid_y, z=mid_z,
                 mode='markers',
-                marker=dict(size=2, opacity=0, color=color),  # Casi invisible
+                marker=dict(size=2, opacity=0, color=color),
                 text=[f"E{e['id']}" for e in els],
                 hovertext=mid_text,
                 hoverinfo='text',
@@ -132,7 +107,8 @@ def generate_structure_figure(structure_data, theme="dark"):
                 legendgroup=f"group{sid}"
             ))
 
-    # --- NODOS ---
+
+def add_nodes_to_figure(fig, nodes, node_fill, node_border):
     if nodes:
         fig.add_trace(go.Scatter3d(
             x=[n['coords'][0] for n in nodes],
@@ -152,38 +128,24 @@ def generate_structure_figure(structure_data, theme="dark"):
             name='Nodos'
         ))
 
-    # --- RESTRICCIONES (APOYOS) ---
+
+def add_supports_to_figure(fig, structure_data, nodes, node_border):
+    node_map = {n['id']: n for n in nodes}
     restraints = structure_data.get('restraints', {})
 
-    # Definición de estilos de apoyo
     support_styles = {
-        'fixed': {
-            'symbol': 'square',
-            'color': '#00ff00',  # SAP2000 Green
-            'name': 'Empotrado'
-        },
-        'pinned': {
-            'symbol': 'triangle-up',
-            'color': '#00ff00',  # SAP2000 Green
-            'name': 'Articulado'
-        },
-        'other': {
-            'symbol': 'circle',
-            'color': '#00ff00',  # SAP2000 Green
-            'name': 'Restricción'
-        }
+        'fixed': {'symbol': 'square', 'color': '#00ff00', 'name': 'Empotrado'},
+        'pinned': {'symbol': 'triangle-up', 'color': '#00ff00', 'name': 'Articulado'},
+        'other': {'symbol': 'circle', 'color': '#00ff00', 'name': 'Restricción'}
     }
 
-    support_data = {k: {'x': [], 'y': [], 'z': [], 'text': []}
-                    for k in support_styles}
+    support_data = {k: {'x': [], 'y': [], 'z': [], 'text': []} for k in support_styles}
 
     for nid_str, dofs in restraints.items():
         node = node_map.get(int(nid_str))
-        if not node:
-            continue
+        if not node: continue
 
         dofs_set = set(dofs)
-        # Lógica simple para clasificar apoyos
         if len(dofs_set) >= 6:
             k = 'fixed'
         elif all(d in dofs_set for d in ['TX', 'TY', 'TZ']):
@@ -196,8 +158,7 @@ def generate_structure_figure(structure_data, theme="dark"):
         support_data[k]['z'].append(node['coords'][2])
         unique_dofs = sorted(list(set(dofs)), key=lambda x: ['ux', 'uy', 'uz', 'rx', 'ry', 'rz'].index(
             x) if x in ['ux', 'uy', 'uz', 'rx', 'ry', 'rz'] else 99)
-        support_data[k]['text'].append(
-            f"Nodo {nid_str}<br>{', '.join(unique_dofs)}")
+        support_data[k]['text'].append(f"Nodo {nid_str}<br>{', '.join(unique_dofs)}")
 
     for k, style in support_styles.items():
         data = support_data[k]
@@ -217,127 +178,112 @@ def generate_structure_figure(structure_data, theme="dark"):
                 hoverinfo='text'
             ))
 
-    # --- CARGAS ---
+
+def add_loads_to_figure(fig, structure_data, nodes):
+    node_map = {n['id']: n for n in nodes}
     loads = structure_data.get('loads', [])
-    if loads:
-        lx, ly, lz, lu, lv, lw = [], [], [], [], [], []
-        forces = [np.linalg.norm([l.get('fx', 0), l.get(
-            'fy', 0), l.get('fz', 0)]) for l in loads]
-        if forces:
-            max_f = max(forces + [1.0])
-            sizeref = max_f / 0.5  # Ajuste de escala de conos
+    if not loads: return
 
-            # --- CÁLCULO DE ESCALA VISUAL ---
-            # Determinamos el tamaño de la estructura para escalar las flechas
-            all_coords = np.array([n['coords'] for n in nodes])
-            if len(all_coords) > 0:
-                min_c = np.min(all_coords, axis=0)
-                max_c = np.max(all_coords, axis=0)
-                max_dim = np.max(max_c - min_c)
-                if max_dim == 0:
-                    max_dim = 100.0
-            else:
-                max_dim = 100.0
+    forces = [np.linalg.norm([l.get('fx', 0), l.get('fy', 0), l.get('fz', 0)]) for l in loads]
+    if not forces: return
 
-            # Longitud máxima de la flecha
-            arrow_scale = max(max_dim * 0.15, 80.0)
+    max_f = max(forces + [1.0])
+    all_coords = np.array([n['coords'] for n in nodes])
+    if len(all_coords) > 0:
+        min_c = np.min(all_coords, axis=0)
+        max_c = np.max(all_coords, axis=0)
+        max_dim = np.max(max_c - min_c)
+        if max_dim == 0: max_dim = 100.0
+    else:
+        max_dim = 100.0
 
-            shaft_x, shaft_y, shaft_z = [], [], []
-            head_x, head_y, head_z = [], [], []
-            head_u, head_v, head_w = [], [], []
+    arrow_scale = max(max_dim * 0.15, 80.0)
+    shaft_x, shaft_y, shaft_z = [], [], []
+    head_x, head_y, head_z = [], [], []
+    head_u, head_v, head_w = [], [], []
 
-            for load in loads:
-                node = node_map.get(load['node_id'])
-                if not node:
-                    continue
+    for load in loads:
+        node = node_map.get(load['node_id'])
+        if not node: continue
 
-                # Vector fuerza
-                fx, fy, fz = load.get('fx', 0), load.get(
-                    'fy', 0), load.get('fz', 0)
-                mag = np.linalg.norm([fx, fy, fz])
+        fx, fy, fz = load.get('fx', 0), load.get('fy', 0), load.get('fz', 0)
+        mag = np.linalg.norm([fx, fy, fz])
 
-                if mag > 0:
-                    dx, dy, dz = fx/mag, fy/mag, fz/mag
-                    rel_mag = mag / max_f
-                    visual_len = arrow_scale * (0.4 + 0.6 * rel_mag)
+        if mag > 0:
+            dx, dy, dz = fx/mag, fy/mag, fz/mag
+            rel_mag = mag / max_f
+            visual_len = arrow_scale * (0.4 + 0.6 * rel_mag)
 
-                    tail_x, tail_y, tail_z = node['coords']
-                    tip_x = tail_x + dx * visual_len
-                    tip_y = tail_y + dy * visual_len
-                    tip_z = tail_z + dz * visual_len
+            tail_x, tail_y, tail_z = node['coords']
+            tip_x = tail_x + dx * visual_len
+            tip_y = tail_y + dy * visual_len
+            tip_z = tail_z + dz * visual_len
 
-                    head_len = visual_len * 0.35
+            head_len = visual_len * 0.35
+            shaft_end_x = tip_x - dx * head_len
+            shaft_end_y = tip_y - dy * head_len
+            shaft_end_z = tip_z - dz * head_len
 
-                    shaft_end_x = tip_x - dx * head_len
-                    shaft_end_y = tip_y - dy * head_len
-                    shaft_end_z = tip_z - dz * head_len
+            shaft_x.extend([tail_x, shaft_end_x, None])
+            shaft_y.extend([tail_y, shaft_end_y, None])
+            shaft_z.extend([tail_z, shaft_end_z, None])
 
-                    shaft_x.extend([tail_x, shaft_end_x, None])
-                    shaft_y.extend([tail_y, shaft_end_y, None])
-                    shaft_z.extend([tail_z, shaft_end_z, None])
+            head_x.append(tip_x)
+            head_y.append(tip_y)
+            head_z.append(tip_z)
+            head_u.append(dx * head_len)
+            head_v.append(dy * head_len)
+            head_w.append(dz * head_len)
 
-                    head_x.append(tip_x)
-                    head_y.append(tip_y)
-                    head_z.append(tip_z)
+    if shaft_x:
+        fig.add_trace(go.Scatter3d(
+            x=shaft_x, y=shaft_y, z=shaft_z,
+            mode='lines',
+            line=dict(color='#ff0000', width=5),
+            name='Líneas de Carga',
+            showlegend=False,
+            hoverinfo='none'
+        ))
 
-                    head_u.append(dx * head_len)
-                    head_v.append(dy * head_len)
-                    head_w.append(dz * head_len)
+    if head_x:
+        fig.add_trace(go.Cone(
+            x=head_x, y=head_y, z=head_z,
+            u=head_u, v=head_v, w=head_w,
+            colorscale=[[0, '#ff0000'], [1, '#ff0000']],
+            showscale=False,
+            sizemode='scaled',
+            sizeref=0.5,
+            anchor='tip',
+            name='Cargas',
+            opacity=1.0,
+            hoverinfo='none'
+        ))
 
-            if shaft_x:
-                fig.add_trace(go.Scatter3d(
-                    x=shaft_x, y=shaft_y, z=shaft_z,
-                    mode='lines',
-                    line=dict(color='#ff0000', width=5),
-                    name='Líneas de Carga',
-                    showlegend=False,
-                    hoverinfo='none'
-                ))
 
-            if head_x:
-                fig.add_trace(go.Cone(
-                    x=head_x, y=head_y, z=head_z,
-                    u=head_u, v=head_v, w=head_w,
-                    colorscale=[[0, '#ff0000'], [1, '#ff0000']],
-                    showscale=False,
-                    sizemode='scaled',
-                    sizeref=0.5,
-                    anchor='tip',
-                    name='Cargas',
-                    opacity=1.0,
-                    hoverinfo='none'
-                ))
+def apply_layout_config(fig, nodes, cfg):
+    is_dark = cfg['is_dark']
+    bg_color = cfg['bg_color']
+    text_color = cfg['text_color']
+    grid_color = cfg['grid_color']
+    axis_color = cfg['axis_color']
+    font_family = cfg['font_family']
 
-    # --- LAYOUT CONFIG ---
-    rx, ry, rz = None, None, None
     if nodes:
         all_coords = np.array([n['coords'] for n in nodes])
         min_coords = np.min(all_coords, axis=0)
         max_coords = np.max(all_coords, axis=0)
         center = (min_coords + max_coords) / 2
-        size = np.max(max_coords - min_coords)
-        if size == 0:
-            size = 1000.0
-        camera_distance = max(size * 1.5, 2.0)
-
-        # Smart Ranges para evitar colapso de ejes en 2D/1D y dar aire
-        def get_ux_range(min_v, max_v, center_v):
+        
+        def get_range(min_v, max_v):
             span = max_v - min_v
-            if span < 1e-6:
-                span = 100.0  # Rango base si no hay dimensión
-                margin = span * 0.4  # 40% buffer para colapsados
-            else:
-                margin = span * 0.2  # 20% margen para otros
+            margin = span * 0.2 if span > 1e-6 else 100.0 * 0.4
             return [min_v - margin, max_v + margin]
 
-        rx = get_ux_range(min_coords[0], max_coords[0], center[0])
-        ry = get_ux_range(min_coords[1], max_coords[1], center[1])
-        rz = get_ux_range(min_coords[2], max_coords[2], center[2])
+        rx = get_range(min_coords[0], max_coords[0])
+        ry = get_range(min_coords[1], max_coords[1])
+        rz = get_range(min_coords[2], max_coords[2])
     else:
-        camera_distance = 10.0
-        rx = [-100, 100]
-        ry = [-100, 100]
-        rz = [-100, 100]
+        rx = ry = rz = [-100, 100]
 
     axis_config = dict(
         gridcolor=grid_color,
@@ -352,9 +298,7 @@ def generate_structure_figure(structure_data, theme="dark"):
         showbackground=True,
         backgroundcolor='rgba(0,0,0,0.01)' if is_dark else 'rgba(0,0,0,0.005)',
         gridwidth=1.0,
-        showspikes=False,
-        spikecolor=axis_color,
-        spikethickness=1
+        showspikes=False
     )
 
     fig.update_layout(
@@ -363,405 +307,248 @@ def generate_structure_figure(structure_data, theme="dark"):
         plot_bgcolor=bg_color,
         font=dict(family=font_family, color=text_color),
         scene=dict(
-            xaxis=dict(**axis_config, title=dict(text='X (mm)'),
-                       range=rx, autorange=False),
-            yaxis=dict(**axis_config, title=dict(text='Y (mm)'),
-                       range=ry, autorange=False),
-            zaxis=dict(**axis_config, title=dict(text='Z (mm)'),
-                       range=rz, autorange=False),
+            xaxis=dict(**axis_config, title=dict(text='X (mm)'), range=rx, autorange=False),
+            yaxis=dict(**axis_config, title=dict(text='Y (mm)'), range=ry, autorange=False),
+            zaxis=dict(**axis_config, title=dict(text='Z (mm)'), range=rz, autorange=False),
             aspectmode='data',
             camera=dict(
                 eye=dict(x=1.8, y=1.8, z=1.4),
                 up=dict(x=0, y=0, z=1),
                 center=dict(x=0, y=0, z=0),
                 projection=dict(type='perspective')
-            ),
-            xaxis_showspikes=False,
-            yaxis_showspikes=False,
-            zaxis_showspikes=False
+            )
         ),
         margin=dict(l=0, r=0, b=0, t=0),
         legend=dict(
             yanchor="top", y=0.98, xanchor="right", x=0.98,
-            bgcolor=bg_color,
-            bordercolor=grid_color,
-            borderwidth=1,
+            bgcolor=bg_color, bordercolor=grid_color, borderwidth=1,
             font=dict(size=11, family=font_family, color=text_color)
         ),
         hoverlabel=dict(
-            bgcolor=bg_color,
-            font_size=11,
-            font_family=font_family,
-            bordercolor=grid_color
+            bgcolor=bg_color, font_size=11, font_family=font_family, bordercolor=grid_color
         ),
         hovermode='closest',
-        dragmode='orbit',
-        scene_camera_projection_type='perspective'
+        dragmode='orbit'
     )
+
+
+def generate_structure_figure(structure_data, theme="dark"):
+    nodes = process_nodes(structure_data)
+    cfg = get_theme_config(theme)
+    fig = go.Figure()
+
+    materials = {m['id']: m for m in structure_data.get('materials', [])}
+    sections = {s['id']: s for s in structure_data.get('sections', [])}
+    
+    add_elements_to_figure(fig, structure_data.get('elements', []), nodes, materials, sections, cfg['palette'])
+    add_nodes_to_figure(fig, nodes, cfg['node_fill'], cfg['node_border'])
+    add_supports_to_figure(fig, structure_data, nodes, cfg['node_border'])
+    add_loads_to_figure(fig, structure_data, nodes)
+    apply_layout_config(fig, nodes, cfg)
 
     return fig
 
 
+def interpolate_beam(p1, p2, d1, d2, segments=4):
+    v_orig = np.array(p2) - np.array(p1)
+    L = np.linalg.norm(v_orig)
+    if L < 1e-6:
+        return [], [], [], [], [], []
+    v_unit = v_orig / L
+
+    disp1 = np.array(d1[:3]) * 1000
+    disp2 = np.array(d2[:3]) * 1000
+    theta1 = np.array(d1[3:])
+    theta2 = np.array(d2[3:])
+
+    t1_def_unit = np.cross(theta1, v_unit)
+    t2_def_unit = np.cross(theta2, v_unit)
+    T1_unit = t1_def_unit * L
+    T2_unit = t2_def_unit * L
+    
+    P1_base = np.array(p1)
+    P2_base = np.array(p2)
+    T1_base = v_unit * L
+    T2_base = v_unit * L
+
+    base_x, base_y, base_z = [], [], []
+    delta_x, delta_y, delta_z = [], [], []
+    t_vals = np.linspace(0, 1, segments+1)
+    
+    for t in t_vals:
+        t2, t3 = t*t, t*t*t
+        h00, h10 = 2*t3 - 3*t2 + 1, t3 - 2*t2 + t
+        h01, h11 = -2*t3 + 3*t2, t3 - t2
+        
+        P_base = h00 * P1_base + h10 * T1_base + h01 * P2_base + h11 * T2_base
+        base_x.append(float(P_base[0]))
+        base_y.append(float(P_base[1]))
+        base_z.append(float(P_base[2]))
+        
+        P_delta = h00 * disp1 + h10 * T1_unit + h01 * disp2 + h11 * T2_unit
+        delta_x.append(float(P_delta[0]))
+        delta_y.append(float(P_delta[1]))
+        delta_z.append(float(P_delta[2]))
+        
+    return base_x, base_y, base_z, delta_x, delta_y, delta_z
+
+
+def get_deformed_traces(sections_elements, node_map, displacements, scale, color):
+    traces = []
+    
+    def clean(v):
+        if v is None: return None
+        return float(v) if np.isfinite(v) else 0.0
+
+    for sid, els in sections_elements.items():
+        bx, by, bz = [], [], []
+        dx, dy, dz = [], [], []
+        for el in els:
+            n1, n2 = node_map.get(el['node_ids'][0]), node_map.get(el['node_ids'][1])
+            if not (n1 and n2): continue
+
+            nid1, nid2 = el['node_ids'][0], el['node_ids'][1]
+            d1 = displacements.get(nid1) or displacements.get(str(nid1), [0]*6)
+            d2 = displacements.get(nid2) or displacements.get(str(nid2), [0]*6)
+            d1, d2 = (list(d1) + [0]*6)[:6], (list(d2) + [0]*6)[:6]
+
+            try:
+                px_b, py_b, pz_b, px_d, py_d, pz_d = interpolate_beam(n1['coords'], n2['coords'], d1, d2)
+                bx.extend(px_b + [None]); by.extend(py_b + [None]); bz.extend(pz_b + [None])
+                dx.extend(px_d + [None]); dy.extend(py_d + [None]); dz.extend(pz_d + [None])
+            except:
+                bx.extend([float(n1['coords'][0]), float(n2['coords'][0]), None])
+                by.extend([float(n1['coords'][1]), float(n2['coords'][1]), None])
+                bz.extend([float(n1['coords'][2]), float(n2['coords'][2]), None])
+                dx.extend([float(d1[0]*1000), float(d2[0]*1000), None])
+                dy.extend([float(d1[1]*1000), float(d2[1]*1000), None])
+                dz.extend([float(d1[2]*1000), float(d2[2]*1000), None])
+
+        final_x = [clean(bx[i] + dx[i]*scale) if bx[i] is not None else None for i in range(len(bx))]
+        final_y = [clean(by[i] + dy[i]*scale) if by[i] is not None else None for i in range(len(by))]
+        final_z = [clean(bz[i] + dz[i]*scale) if bz[i] is not None else None for i in range(len(bz))]
+
+        cdata = []
+        for i in range(len(bx)):
+            if bx[i] is None:
+                cdata.append([None] * 6)
+            else:
+                cdata.append([clean(bx[i]), clean(by[i]), clean(bz[i]), clean(dx[i]), clean(dy[i]), clean(dz[i])])
+
+        traces.append(go.Scatter3d(
+            x=final_x, y=final_y, z=final_z,
+            mode='lines',
+            line=dict(color=color, width=4),
+            name=f"Deformada {sid}",
+            customdata=cdata,
+            hovertemplate="Deformada<br>X: %{x:.2f}<br>Y: %{y:.2f}<br>Z: %{z:.2f}<extra></extra>"
+        ))
+    return traces
+
+
 def generate_results_figure(structure_data, displacements, scale=1.0, theme="dark", animate=False):
-    """
-    Genera la figura de resultados (deformada) basándose en la figura base.
-    Si animate=True, genera frames para animación armónica.
-    """
     fig = generate_structure_figure(structure_data, theme=theme)
-    is_dark = theme == "dark"
+    cfg = get_theme_config(theme)
+    is_dark = cfg['is_dark']
 
-    # Colores
     ghost_opacity = 0.15
-    deformed_color = '#ff00ff'  # SAP2000 Magenta
+    deformed_color = '#ff00ff'
 
-    if is_dark:
-        bg_color = '#000000'
-        grid_color = 'rgba(255, 255, 255, 0.15)'
-        axis_color = '#888888'
-        text_color = '#ffffff'
-    else:
-        bg_color = '#ffffff'
-        grid_color = 'rgba(0, 0, 0, 0.1)'
-        axis_color = '#444444'
-        text_color = '#000000'
-
-    # Atenuar la estructura original
     for trace in fig.data:
         if isinstance(trace, go.Scatter3d):
             mode = getattr(trace, 'mode', '') or ''
             if mode == 'lines':
-                # Safely get color
                 orig_color = '#888888'
                 try:
                     if hasattr(trace, 'line') and trace.line:
                         c = getattr(trace.line, 'color', None)
-                        if c:
-                            orig_color = c
-                except:
-                    pass
-
-                trace.update(
-                    line=dict(width=2, color=orig_color), opacity=ghost_opacity)
+                        if c: orig_color = c
+                except: pass
+                trace.update(line=dict(width=2, color=orig_color), opacity=ghost_opacity)
             elif 'markers' in mode:
                 trace.update(opacity=ghost_opacity)
         elif isinstance(trace, go.Cone):
             trace.update(opacity=ghost_opacity)
 
-    # Preparar datos comunes
-    nodes = []
-    for n in structure_data.get('nodes', []):
-        nodes.append({
-            **n,
-            'coords': [n['coords'][0] * 1000, n['coords'][1] * 1000, n['coords'][2] * 1000]
-        })
-    elements = structure_data.get('elements', [])
+    nodes = process_nodes(structure_data)
     node_map = {n['id']: n for n in nodes}
-    sections = {s['id']: s for s in structure_data.get('sections', [])}
+    elements = structure_data.get('elements', [])
     sections_elements = {}
     for el in elements:
         sections_elements.setdefault(el.get('section_id'), []).append(el)
 
-    # Función auxiliar para interpolación
-    def interpolate_beam(p1, p2, d1, d2, current_scale, segments=4):
-        # p1, p2: Coordenadas originales (mm)
-        # d1, d2: Desplazamientos [ux, uy, uz, rx, ry, rz] (m, rad)
+    base_traces = get_deformed_traces(sections_elements, node_map, displacements, scale, deformed_color)
+    if base_traces: base_traces[0].showlegend = True
+    for t in base_traces: fig.add_trace(t)
 
-        # 1. Puntos finales deformados
-        disp1 = np.array(d1[:3]) * 1000 * current_scale
-        disp2 = np.array(d2[:3]) * 1000 * current_scale
-        P1_def = np.array(p1) + disp1
-        P2_def = np.array(p2) + disp2
-
-        # 2. Vectores tangentes
-        v_orig = np.array(p2) - np.array(p1)
-        L = np.linalg.norm(v_orig)
-        if L < 1e-6:
-            return [], [], []
-
-        theta1 = np.array(d1[3:]) * current_scale
-        theta2 = np.array(d2[3:]) * current_scale
-
-        v_unit = v_orig / L
-        t1_def = v_unit + np.cross(theta1, v_unit)
-        t2_def = v_unit + np.cross(theta2, v_unit)
-        T1 = t1_def * L
-        T2 = t2_def * L
-
-        # 3. Generar puntos
-        points_x, points_y, points_z = [], [], []
-        t_vals = np.linspace(0, 1, segments+1)
-        for t in t_vals:
-            t2 = t * t
-            t3 = t2 * t
-            h00 = 2*t3 - 3*t2 + 1
-            h10 = t3 - 2*t2 + t
-            h01 = -2*t3 + 3*t2
-            h11 = t3 - t2
-            P = h00 * P1_def + h10 * T1 + h01 * P2_def + h11 * T2
-            points_x.append(float(P[0]))
-            points_y.append(float(P[1]))
-            points_z.append(float(P[2]))
-        return points_x, points_y, points_z
-
-    def get_deformed_traces(current_scale):
-        traces = []
-        for sid, els in sections_elements.items():
-            dx, dy, dz = [], [], []
-            for el in els:
-                n1 = node_map.get(el['node_ids'][0])
-                n2 = node_map.get(el['node_ids'][1])
-                nid1, nid2 = el['node_ids'][0], el['node_ids'][1]
-
-                d1 = displacements.get(nid1)
-                if d1 is None:
-                    d1 = displacements.get(str(nid1), [0]*6)
-                d2 = displacements.get(nid2)
-                if d2 is None:
-                    d2 = displacements.get(str(nid2), [0]*6)
-                d1 = (list(d1) + [0]*6)[:6]
-                d2 = (list(d2) + [0]*6)[:6]
-
-                if n1 and n2:
-                    try:
-                        px, py, pz = interpolate_beam(
-                            n1['coords'], n2['coords'], d1, d2, current_scale)
-                        dx.extend(px + [None])
-                        dy.extend(py + [None])
-                        dz.extend(pz + [None])
-                    except:
-                        # Fallback simple
-                        p1_def = [n1['coords'][i] + d1[i] *
-                                  1000*current_scale for i in range(3)]
-                        p2_def = [n2['coords'][i] + d2[i] *
-                                  1000*current_scale for i in range(3)]
-                        dx.extend([float(p1_def[0]), float(p2_def[0]), None])
-                        dy.extend([float(p1_def[1]), float(p2_def[1]), None])
-                        dz.extend([float(p1_def[2]), float(p2_def[2]), None])
-
-            # Sanitizar
-            def clean_val(v):
-                if v is None:
-                    return None
-                try:
-                    if np.isnan(v) or np.isinf(v):
-                        return 0.0
-                    return float(v)
-                except:
-                    return 0.0
-
-            dx = [clean_val(v) for v in dx]
-            dy = [clean_val(v) for v in dy]
-            dz = [clean_val(v) for v in dz]
-
-            if dx:
-                traces.append(go.Scatter3d(
-                    x=dx, y=dy, z=dz, mode='lines',
-                    line=dict(color=deformed_color, width=5),
-                    name=f'Deformada {sections[sid].get(
-                        "name", f"Seccion {sid}")}' if sid in sections else 'Deformada',
-                    showlegend=True if sid == list(
-                        sections_elements.keys())[0] else False
-                ))
-        return traces
-
-    # Agregar trazas base (estáticas)
-    base_traces = get_deformed_traces(scale)
-    base_traces[0].showlegend = True
-    for t in base_traces:
-        fig.add_trace(t)
-
-    # Si es animación, generar frames
     if animate:
         frames = []
         num_frames = 20
-        # Indices de trazas a actualizar (las últimas que agregamos)
-        data_list = list(fig.data)
-        static_trace_count = len(data_list) - len(base_traces)
-        indices_to_update = list(range(static_trace_count, len(data_list)))
+        static_trace_count = len(fig.data) - len(base_traces)
+        indices_to_update = list(range(static_trace_count, len(fig.data)))
 
         for i in range(num_frames):
-            phase = i / num_frames
-            factor = np.cos(2 * np.pi * phase) * scale
-            frame_traces = get_deformed_traces(factor)
-
-            frames.append(go.Frame(
-                data=frame_traces,
-                name=f'fr{i}',
-                traces=indices_to_update
-            ))
+            factor = np.cos(2 * np.pi * i / num_frames) * scale
+            frame_traces = get_deformed_traces(sections_elements, node_map, displacements, factor, deformed_color)
+            frames.append(go.Frame(data=frame_traces, name=f'fr{i}', traces=indices_to_update))
 
         fig.frames = frames
+        
+        play_pause_buttons = [
+            {"label": "▶ Play", "method": "animate", "args": [None, {"frame": {"duration": 50, "redraw": True}, "fromcurrent": True, "mode": "immediate", "transition": {"duration": 0}, "repeat": True}]},
+            {"label": "❚❚ Pause", "method": "animate", "args": [[None], {"frame": {"duration": 0, "redraw": False}, "mode": "immediate", "transition": {"duration": 0}}]},
+            {"label": "■ Stop", "method": "animate", "args": [['fr0'], {"frame": {"duration": 0, "redraw": True}, "mode": "immediate", "transition": {"duration": 0}}]}
+        ]
 
-        # Botones de Play/Pause y configuración de animación
         fig.update_layout(
             updatemenus=[{
-                "type": "buttons",
-                "showactive": False,
-                "x": 0.5, "y": 0.05, "xanchor": "center", "yanchor": "bottom",  # Centrado abajo
-                "direction": "left",
-                "pad": {"t": 0, "r": 10},
-                "buttons": [
-                    {
-                        "label": "▶ Play",
-                        "method": "animate",
-                        "args": [
-                            None,
-                            {
-                                "frame": {"duration": 50, "redraw": True},
-                                "fromcurrent": True,
-                                "mode": "immediate",
-                                "transition": {"duration": 0},
-                                "repeat": True
-                            }
-                        ]
-
-                    },
-                    {
-                        "label": "❚❚ Pause",
-                        "method": "animate",
-                        "args": [
-                            [None],
-                            {
-                                "frame": {"duration": 0, "redraw": False},
-                                "mode": "immediate",
-                                "transition": {"duration": 0}
-                            }
-                        ]
-                    },
-                    {
-                        "label": "■ Stop",
-                        "method": "animate",
-                        "args": [
-                            ['fr0'],  # Volver al frame 0
-                            {
-                                "frame": {"duration": 0, "redraw": True},
-                                "mode": "immediate",
-                                "transition": {"duration": 0}
-                            }
-                        ]
-                    }
-                ],
+                "type": "buttons", "showactive": False, "x": 0.5, "y": 0.05, "xanchor": "center", "yanchor": "bottom",
+                "direction": "left", "pad": {"t": 0, "r": 10}, "buttons": play_pause_buttons,
                 "bgcolor": "rgba(255, 255, 255, 0.9)" if not is_dark else "rgba(0, 0, 0, 0.9)",
-                "font": {"color": "#000" if not is_dark else "#fff"},
-                "bordercolor": grid_color,
-                "borderwidth": 1
+                "font": {"color": "#000" if not is_dark else "#fff"}, "bordercolor": cfg['grid_color'], "borderwidth": 1
             }],
-            sliders=[{
-                "active": 0,
-                "yanchor": "top",
-                "xanchor": "left",
-                "currentvalue": {
-                    "font": {"size": 20},
-                    "prefix": "Fase:",
-                    "visible": False,
-                    "xanchor": "right"
-                },
-                "transition": {"duration": 0},
-                "pad": {"b": 10, "t": 50},
-                "len": 0.9,
-                "x": 0.1,
-                "y": 0,
-                "steps": []  # Slider visual opcional, lo ocultamos para limpieza
-            }]
+            sliders=[{"active": 0, "yanchor": "top", "xanchor": "left", "transition": {"duration": 0}, "pad": {"b": 10, "t": 50}, "len": 0.9, "x": 0.1, "y": 0, "steps": []}]
         )
 
-    # --- LAYOUT CONFIG & FIXED RANGES ---
-    # Encontramos la extensión real de TODAS las trazas (original + deformada)
-    # Esto asegura que la deformada interpolada nunca se corte.
     min_coords = np.array([float('inf')] * 3)
     max_coords = np.array([float('-inf')] * 3)
     found_any = False
 
     for trace in fig.data:
-        # Extraer puntos x, y, z de la traza (Scatter3d)
         if hasattr(trace, 'x') and trace.x is not None:
-            # Filtrar valores None (separadores) y convertir a float
             pts_x = [float(v) for v in trace.x if v is not None]
             pts_y = [float(v) for v in trace.y if v is not None]
             pts_z = [float(v) for v in trace.z if v is not None]
 
             if pts_x:
-                min_coords[0] = min(min_coords[0], min(pts_x))
-                max_coords[0] = max(max_coords[0], max(pts_x))
-                min_coords[1] = min(min_coords[1], min(pts_y))
-                max_coords[1] = max(max_coords[1], max(pts_y))
-                min_coords[2] = min(min_coords[2], min(pts_z))
-                max_coords[2] = max(max_coords[2], max(pts_z))
+                min_coords = np.minimum(min_coords, [min(pts_x), min(pts_y), min(pts_z)])
+                max_coords = np.maximum(max_coords, [max(pts_x), max(pts_y), max(pts_z)])
                 found_any = True
 
     if not found_any:
-        min_coords = np.array([-100, -100, -100])
-        max_coords = np.array([100, 100, 100])
+        min_coords, max_coords = np.array([-100.0]*3), np.array([100.0]*3)
 
-    def get_extended_range(min_v, max_v):
+    def get_ext_range(min_v, max_v):
         span = max_v - min_v
-        if span < 1e-4:
-            span = 100.0  # Rango base si no hay dimensión
-
-        # Buffer del 40% para asegurar que todo entre con aire
-        margin = span * 0.4
+        margin = max(span, 100.0) * 0.4
         return [min_v - margin, max_v + margin]
 
-    rx = get_extended_range(min_coords[0], max_coords[0])
-    ry = get_extended_range(min_v=min_coords[1], max_v=max_coords[1])
-    rz = get_extended_range(min_coords[2], max_coords[2])
-
-    # Colores técnicos para los dos modos (Día/Noche)
-    grid_col = 'rgba(255, 255, 255, 0.08)' if is_dark else 'rgba(0, 0, 0, 0.06)'
-    zero_col = '#444444' if not is_dark else '#888888'
-
     axis_style = dict(
-        gridcolor=grid_col,
-        zerolinecolor=zero_col,
-        nticks=6,
-        tickformat='.0f',
-        showgrid=True,
-        zerolinewidth=2,
-        gridwidth=1.0,
-        showbackground=True,
-        backgroundcolor='rgba(0,0,0,0)',
-        showspikes=False
+        gridcolor='rgba(255, 255, 255, 0.08)' if is_dark else 'rgba(0, 0, 0, 0.06)',
+        zerolinecolor='#888888' if is_dark else '#444444',
+        nticks=6, tickformat='.0f', showgrid=True, zerolinewidth=2, gridwidth=1.0, showbackground=True, backgroundcolor='rgba(0,0,0,0)', showspikes=False
     )
 
     fig.update_layout(
         scene=dict(
-            xaxis=dict(range=rx, autorange=False, **
-                       axis_style, title_text='X (mm)'),
-            yaxis=dict(range=ry, autorange=False, **
-                       axis_style, title_text='Y (mm)'),
-            zaxis=dict(range=rz, autorange=False, **
-                       axis_style, title_text='Z (mm)'),
-            aspectmode='data',
-            camera=dict(
-                eye=dict(x=1.8, y=1.8, z=1.4),
-                projection=dict(type='perspective')
-            )
-        )
+            xaxis=dict(range=get_ext_range(min_coords[0], max_coords[0]), autorange=False, **axis_style, title_text='X (mm)'),
+            yaxis=dict(range=get_ext_range(min_coords[1], max_coords[1]), autorange=False, **axis_style, title_text='Y (mm)'),
+            zaxis=dict(range=get_ext_range(min_coords[2], max_coords[2]), autorange=False, **axis_style, title_text='Z (mm)'),
+            aspectmode='data', camera=dict(eye=dict(x=1.8, y=1.8, z=1.4), projection=dict(type='perspective'))
+        ),
+        title_text=f"Análisis {scale}x{(' (Animación)' if animate else '')}"
     )
 
-    title_suffix = " (Animación)" if animate else ""
-    fig.update_layout(title_text=f"Análisis {scale}x{title_suffix}")
-
-    # Detectar predominancia (Heurística: Rotación vs Traslación)
-    u_vals = [v for v in displacements.values() if v is not None]
-    if u_vals and animate:
-        arr = np.array(u_vals)
-        norm_t = np.mean(np.linalg.norm(arr[:, :3], axis=1))
-        norm_r = np.mean(np.linalg.norm(arr[:, 3:6], axis=1))
-
-        # Factor de escala empírico para comparar m con rad
-        # (Una rotación de 1 rad es enorme, una traslación de 1m es enorme)
-        # Usamos ratio 1:1 para simplificar, o 1:0.5
-        is_rot = norm_r > norm_t * 0.5
-        pred = "ROTACIONAL / TORSIÓN" if is_rot else "TRASLACIONAL"
-
-        fig.add_annotation(
-            text=f"MODO {pred}",
-            xref="paper", yref="paper",
-            x=0.05, y=0.95, showarrow=False,
-            font=dict(size=12, color='#ffffff' if is_dark else '#000000'),
-            bgcolor=deformed_color,
-            borderpad=4, opacity=0.8
-        )
-
     return fig
+
+
