@@ -21,10 +21,14 @@ if not jwt_secret:
 supabase: Client = create_client(url, clean_key)
 
 async def get_current_user(authorization: str = Header(None)):
+    ANONYMOUS_USER_ID = "00000000-0000-0000-0000-000000000000"
+    
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+        return {"sub": ANONYMOUS_USER_ID, "email": "anonymous@example.com"}
     
     token = authorization.split(" ")[1]
+    if token == "undefined" or token == "null":
+        return {"sub": ANONYMOUS_USER_ID, "email": "anonymous@example.com"}
     
     try:
         pem_secret = jwt_secret

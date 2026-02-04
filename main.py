@@ -357,7 +357,14 @@ async def get_project(project_id: str, user=Depends(get_current_user)):
 @app.post("/api/projects")
 async def create_project(project_data: dict, user=Depends(get_current_user)):
     try:
-        payload = {**project_data, "user_id": user["sub"]}
+        raw_structure = project_data.get("structure_data", {})
+        validated_structure = StructureInput(**raw_structure).model_dump(by_alias=True)
+        
+        payload = {
+            "name": project_data.get("name", "Nuevo Proyecto"),
+            "structure_data": validated_structure,
+            "user_id": user["sub"]
+        }
         response = supabase.table("projects").insert(payload).execute()
         return response.data[0]
     except Exception as e:
@@ -376,7 +383,19 @@ async def delete_project(project_id: str, user=Depends(get_current_user)):
 @app.put("/api/projects/{project_id}")
 async def update_project(project_id: str, project_data: dict, user=Depends(get_current_user)):
     try:
-        response = supabase.table("projects").update(project_data).eq("id", project_id).eq("user_id", user["sub"]).execute()
+        update_payload = {}
+        if "name" in project_data:
+            update_payload["name"] = project_data["name"]
+        
+        if "structure_data" in project_data:
+            raw_structure = project_data["structure_data"]
+            validated_structure = StructureInput(**raw_structure).model_dump(by_alias=True)
+            update_payload["structure_data"] = validated_structure
+
+        if not update_payload:
+            return {"status": "no changes"}
+
+        response = supabase.table("projects").update(update_payload).eq("id", project_id).eq("user_id", user["sub"]).execute()
         if not response.data:
             raise HTTPException(status_code=404, detail="Project not found or not owned by user")
         return response.data[0]
