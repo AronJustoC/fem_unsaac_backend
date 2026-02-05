@@ -1,0 +1,6 @@
+{
+  "python": {
+    "venvPath": ".",
+    "venv": "venv"
+  }
+}

@@ -1,0 +1,43 @@
+# 🐍 Archivos de Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pdb
+*.egg
+*.egg-info/
+*.manifest
+*.spec
+
+# 📦 Entornos virtuales
+venv/
+.env/
+.venv/
+.env
+
+# 🧠 Configuraciones locales
+.pyrightconfig.json
+.vscode/
+.idea/
+.mypy_cache/
+.pytest_cache/
+.cache/
+
+# 📂 Archivos de sistema
+.DS_Store
+Thumbs.db
+
+# 🧪 Archivos de prueba / build
+dist/
+build/
+*.log
+.coverage
+htmlcov/
+*.db
+
+# 🔧 Neovim / Editor
+*.swp
+*.swo
+.session
+tags
+

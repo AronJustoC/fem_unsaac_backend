@@ -1,0 +1,59 @@
+{
+  "nodes": [
+    {"id": 0, "coords": [0, 0, 0]},
+    {"id": 1, "coords": [5, 0, 0]},
+    {"id": 2, "coords": [10, 0, 0]},
+    {"id": 3, "coords": [0, 5, 0]},
+    {"id": 4, "coords": [5, 5, 0]},
+    {"id": 5, "coords": [10, 5, 0]},
+    {"id": 6, "coords": [5, 2.5, 5]}
+  ],
+  "materials": [
+    {
+      "id": 1,
+      "E": 210000000000,
+      "nu": 0.3,
+      "rho": 7850,
+      "G": 80769230769.23
+    }
+  ],
+  "sections": [
+    {
+      "id": 1,
+      "area": 0.015,
+      "Iz": 0.000058,
+      "Iy": 0.000125,
+      "J": 0.000085
+    }
+  ],
+  "elements": [
+    {"id": 1, "node_ids": [0, 1], "material_id": 1, "section_id": 1},
+    {"id": 2, "node_ids": [1, 2], "material_id": 1, "section_id": 1},
+    {"id": 3, "node_ids": [3, 4], "material_id": 1, "section_id": 1},
+    {"id": 4, "node_ids": [4, 5], "material_id": 1, "section_id": 1},
+    {"id": 5, "node_ids": [0, 3], "material_id": 1, "section_id": 1},
+    {"id": 6, "node_ids": [1, 4], "material_id": 1, "section_id": 1},
+    {"id": 7, "node_ids": [2, 5], "material_id": 1, "section_id": 1},
+    {"id": 8, "node_ids": [0, 6], "material_id": 1, "section_id": 1},
+    {"id": 9, "node_ids": [1, 6], "material_id": 1, "section_id": 1},
+    {"id": 10, "node_ids": [2, 6], "material_id": 1, "section_id": 1},
+    {"id": 11, "node_ids": [3, 6], "material_id": 1, "section_id": 1},
+    {"id": 12, "node_ids": [4, 6], "material_id": 1, "section_id": 1},
+    {"id": 13, "node_ids": [5, 6], "material_id": 1, "section_id": 1}
+  ],
+  "loads": [
+    {
+      "node_id": 6,
+      "fx": 0,
+      "fy": 0,
+      "fz": -5000000,
+      "mx": 0,
+      "my": 0,
+      "mz": 0
+    }
+  ],
+  "restraints": {
+    "0": ["ux", "uy", "uz"],
+    "3": ["ux", "uy", "uz"]
+  }
+}
