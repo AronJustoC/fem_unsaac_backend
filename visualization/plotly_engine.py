@@ -122,8 +122,7 @@ def add_nodes_to_figure(fig, nodes, node_fill, node_border):
                 symbol='circle',
                 opacity=1.0
             ),
-            hovertext=[f"<b>Nodo {n['id']}</b><br>({n['coords'][0]:.2f}, {n['coords'][1]:.2f}, {
-                n['coords'][2]:.2f})" for n in nodes],
+            hovertext=[f"<b>Nodo {n['id']}</b><br>({n['coords'][0]:.2f}, {n['coords'][1]:.2f}, {n['coords'][2]:.2f})" for n in nodes],
             hoverinfo='text',
             name='Nodos'
         ))
