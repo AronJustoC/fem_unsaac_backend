@@ -69,9 +69,10 @@ from fastapi import Depends
 from supabase_client import get_current_user, supabase
 from tasks import run_analysis_task
 from storage import download_result
+from signal_core.signal_api import router as signal_router
 
-app = FastAPI(title="API de analisis Estructural 3D",
-              description="API para realizar analisis estaticos, modales y armonicos de estructuras",
+app = FastAPI(title="API de Análisis Estructural y Procesamiento de Señales",
+              description="API para realizar análisis estáticos, modales, armónicos de estructuras y procesamiento de señales de vibración para puentes",
               version="1.0.0")
 
 @app.get("/health")
@@ -86,6 +87,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Registrar rutas de procesamiento de señales
+app.include_router(signal_router)
 
 @app.get("/api/library/standard", summary="Obtiene la biblioteca estandar de materiales y secciones")
 async def get_standard_library():
