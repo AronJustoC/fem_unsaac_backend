@@ -392,7 +392,16 @@ def interpolate_beam(p1, p2, d1, d2, segments=4):
     return base_x, base_y, base_z, delta_x, delta_y, delta_z
 
 
-def get_deformed_traces(sections_elements, node_map, displacements, scale, color):
+def get_deformed_traces(
+    sections_elements,
+    node_map,
+    displacements,
+    scale,
+    color,
+    interpolation_segments=4,
+    include_customdata=True,
+    include_hover=True,
+):
     traces = []
     
     def clean(v):
@@ -412,7 +421,13 @@ def get_deformed_traces(sections_elements, node_map, displacements, scale, color
             d1, d2 = (list(d1) + [0]*6)[:6], (list(d2) + [0]*6)[:6]
 
             try:
-                px_b, py_b, pz_b, px_d, py_d, pz_d = interpolate_beam(n1['coords'], n2['coords'], d1, d2)
+                px_b, py_b, pz_b, px_d, py_d, pz_d = interpolate_beam(
+                    n1['coords'],
+                    n2['coords'],
+                    d1,
+                    d2,
+                    segments=interpolation_segments,
+                )
                 bx.extend(px_b + [None]); by.extend(py_b + [None]); bz.extend(pz_b + [None])
                 dx.extend(px_d + [None]); dy.extend(py_d + [None]); dz.extend(pz_d + [None])
             except:
@@ -427,25 +442,41 @@ def get_deformed_traces(sections_elements, node_map, displacements, scale, color
         final_y = [clean(by[i] + dy[i]*scale) if by[i] is not None else None for i in range(len(by))]
         final_z = [clean(bz[i] + dz[i]*scale) if bz[i] is not None else None for i in range(len(bz))]
 
-        cdata = []
-        for i in range(len(bx)):
-            if bx[i] is None:
-                cdata.append([None] * 6)
-            else:
-                cdata.append([clean(bx[i]), clean(by[i]), clean(bz[i]), clean(dx[i]), clean(dy[i]), clean(dz[i])])
-
-        traces.append(go.Scatter3d(
+        trace_kwargs = dict(
             x=final_x, y=final_y, z=final_z,
             mode='lines',
             line=dict(color=color, width=4),
             name=f"Deformada {sid}",
-            customdata=cdata,
-            hovertemplate="Deformada<br>X: %{x:.2f}<br>Y: %{y:.2f}<br>Z: %{z:.2f}<extra></extra>"
-        ))
+        )
+
+        if include_customdata:
+            cdata = []
+            for i in range(len(bx)):
+                if bx[i] is None:
+                    cdata.append([None] * 6)
+                else:
+                    cdata.append([clean(bx[i]), clean(by[i]), clean(bz[i]), clean(dx[i]), clean(dy[i]), clean(dz[i])])
+            trace_kwargs["customdata"] = cdata
+
+        if include_hover:
+            trace_kwargs["hovertemplate"] = "Deformada<br>X: %{x:.2f}<br>Y: %{y:.2f}<br>Z: %{z:.2f}<extra></extra>"
+        else:
+            trace_kwargs["hoverinfo"] = "skip"
+            trace_kwargs["showlegend"] = False
+
+        traces.append(go.Scatter3d(**trace_kwargs))
     return traces
 
 
-def generate_results_figure(structure_data, displacements, scale=1.0, theme="dark", animate=False):
+def generate_results_figure(
+    structure_data,
+    displacements,
+    scale=1.0,
+    theme="dark",
+    animate=False,
+    frame_count=10,
+    interpolation_segments=4,
+):
     fig = generate_structure_figure(structure_data, theme=theme)
     cfg = get_theme_config(theme)
     is_dark = cfg['is_dark']
@@ -476,19 +507,38 @@ def generate_results_figure(structure_data, displacements, scale=1.0, theme="dar
     for el in elements:
         sections_elements.setdefault(el.get('section_id'), []).append(el)
 
-    base_traces = get_deformed_traces(sections_elements, node_map, displacements, scale, deformed_color)
+    interpolation_segments = int(max(1, min(interpolation_segments, 6)))
+    base_traces = get_deformed_traces(
+        sections_elements,
+        node_map,
+        displacements,
+        scale,
+        deformed_color,
+        interpolation_segments=interpolation_segments,
+        include_customdata=True,
+        include_hover=True,
+    )
     if base_traces: base_traces[0].showlegend = True
     for t in base_traces: fig.add_trace(t)
 
     if animate:
         frames = []
-        num_frames = 20
+        num_frames = int(max(4, min(frame_count, 30)))
         static_trace_count = len(fig.data) - len(base_traces)
         indices_to_update = list(range(static_trace_count, len(fig.data)))
 
         for i in range(num_frames):
             factor = np.cos(2 * np.pi * i / num_frames) * scale
-            frame_traces = get_deformed_traces(sections_elements, node_map, displacements, factor, deformed_color)
+            frame_traces = get_deformed_traces(
+                sections_elements,
+                node_map,
+                displacements,
+                factor,
+                deformed_color,
+                interpolation_segments=interpolation_segments,
+                include_customdata=False,
+                include_hover=False,
+            )
             frames.append(go.Frame(data=frame_traces, name=f'fr{i}', traces=indices_to_update))
 
         fig.frames = frames
@@ -549,5 +599,4 @@ def generate_results_figure(structure_data, displacements, scale=1.0, theme="dar
     )
 
     return fig
-
 

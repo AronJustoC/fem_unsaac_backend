@@ -44,6 +44,7 @@ class LRUCache:
 
 _static_cache = LRUCache(CACHE_MAX_SIZE)
 _modal_cache = LRUCache(CACHE_MAX_SIZE)
+_modal_viz_cache = LRUCache(50)
 
 
 def _sort_nested(obj):
@@ -293,7 +294,10 @@ async def get_modal_results_viz(
     mode_index: int = 0,
     num_modes: int = 12,
     scale: float = 1.0,
-    theme: str = "dark"
+    theme: str = "dark",
+    animate: bool = False,
+    frame_count: int = 10,
+    detail: int = 2,
 ):
     try:
         structure_data = structure_input.model_dump()
@@ -320,6 +324,26 @@ async def get_modal_results_viz(
         if mode_index >= len(frequencies):
             mode_index = 0
 
+        detail = max(1, min(int(detail), 6))
+        frame_count = max(4, min(int(frame_count), 30))
+        viz_cache_key = compute_structure_hash(
+            structure_data,
+            {
+                "analysis": "modal-viz",
+                "num_modes": num_modes,
+                "mode_index": mode_index,
+                "scale": round(float(scale), 8),
+                "theme": theme,
+                "animate": animate,
+                "frame_count": frame_count if animate else 0,
+                "detail": detail,
+            },
+        )
+        cached_json = _modal_viz_cache.get(viz_cache_key)
+        if cached_json is not None:
+            print(f"[CACHE HIT] Modal viz json - key: {viz_cache_key[:16]}...")
+            return Response(content=cached_json, media_type="application/json")
+
         displacements = {nid: shapes[mode_index]
                          for nid, shapes in mode_shapes.items()}
 
@@ -328,9 +352,14 @@ async def get_modal_results_viz(
             displacements,
             scale,
             theme=theme,
-            animate=True
+            animate=animate,
+            frame_count=frame_count,
+            interpolation_segments=detail,
         )
-        return Response(content=fig.to_json(), media_type="application/json")
+        fig_json = fig.to_json()
+        _modal_viz_cache.set(viz_cache_key, fig_json)
+        print(f"[CACHE SET] Modal viz json - key: {viz_cache_key[:16]}...")
+        return Response(content=fig_json, media_type="application/json")
     except Exception as e:
         import traceback
         traceback.print_exc()
