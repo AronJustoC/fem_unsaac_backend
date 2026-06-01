@@ -383,9 +383,36 @@ def run_harmonic_analysis(request_data: dict) -> dict:
         damping_ratio = float(request_data.get('damping_ratio', 0.05))
         is_unbalanced = bool(request_data.get('is_unbalanced', False))
         unbalanced_me = float(request_data.get('unbalanced_me', 0.0))
+        unbalanced_node_id = request_data.get('unbalanced_node_id')
+        unbalanced_direction = request_data.get('unbalanced_direction') or [0.0, 1.0, 0.0]
+        unbalanced_mass = float(request_data.get('unbalanced_mass') or 0.0)
+        unbalanced_eccentricity = float(request_data.get('unbalanced_eccentricity') or 0.0)
         mass_type = structure_data.get('settings', {}).get('mass_type', 'lumped')
 
-        structure, nodes_map_core, materials_map, id_map, warnings = _build_structure(structure_data, mass_type=mass_type)
+        if freq_start < 0:
+            return {"error": "La frecuencia inicial no puede ser negativa."}
+        if freq_end <= freq_start:
+            return {"error": "La frecuencia final debe ser mayor que la frecuencia inicial."}
+        if num_points < 2 or num_points > 1000:
+            return {"error": "El barrido armónico debe tener entre 2 y 1000 puntos."}
+        if damping_ratio < 0:
+            return {"error": "La relación de amortiguamiento no puede ser negativa."}
+        has_explicit_unbalance = is_unbalanced and (
+            unbalanced_node_id is not None or unbalanced_mass > 0 or unbalanced_eccentricity > 0
+        )
+        if is_unbalanced:
+            if has_explicit_unbalance:
+                if unbalanced_node_id is None:
+                    return {"error": "Para fuerza de desbalance, selecciona el nodo donde se aplicará la excitación."}
+                if unbalanced_mass <= 0:
+                    return {"error": "Para fuerza de desbalance, la masa m debe ser mayor que cero."}
+                if unbalanced_eccentricity <= 0:
+                    return {"error": "Para fuerza de desbalance, la excentricidad e debe ser mayor que cero."}
+                unbalanced_me = unbalanced_mass * unbalanced_eccentricity
+            elif unbalanced_me <= 0:
+                return {"error": "Para fuerza de desbalance, el producto m·e debe ser mayor que cero."}
+
+        structure, nodes_map_core, _, id_map, warnings = _build_structure(structure_data, mass_type=mass_type)
         loads = structure_data.get('loads', [])
         
         if warnings:
@@ -399,54 +426,134 @@ def run_harmonic_analysis(request_data: dict) -> dict:
         if K_global is None or M_global is None:
             return {"error": "Error al ensamblar las matrices globales."}
 
-        # Calcular amortiguamiento de Rayleigh simplificado
-        # Obtenemos la primera frecuencia para calibrar beta (stiffness proportional)
+        # Calcular amortiguamiento de Rayleigh simplificado con la primera frecuencia natural.
         freqs, _, _ = modal_analysis(K_global, M_global, structure, num_modes=1, debug=False)
         if len(freqs) > 0 and freqs[0] > 0:
             omega1 = 2 * np.pi * freqs[0]
             beta = 2 * damping_ratio / omega1
             alpha = 0.0
         else:
-            # Fallback si no hay frecuencias (estructura libre?)
             beta = 0.001
             alpha = 0.0
         
         C_global = rayleigh_damping_matrix(M_global, K_global, alpha, beta)
 
-        # Preparar vector de fuerza
+        # Preparar vector de fuerza:
+        # - Fuerza armónica normal: las cargas del editor son amplitudes F0.
+        # - Fuerza por desbalance nueva: el usuario define nodo + dirección + m + e.
+        # - Fuerza por desbalance legacy: las cargas del editor definen la dirección y
+        #   la magnitud se calcula con unbalanced_me * ω².
         F_amplitude = np.zeros(structure.num_dofs)
         dof_map = {"fx": 0, "fy": 1, "fz": 2, "mx": 3, "my": 4, "mz": 5}
-        for load_data in loads:
-            original_node_id = load_data.get('node_id')
-            rep_id = id_map.get(original_node_id)
-            if rep_id and rep_id in nodes_map_core:
-                node_core = nodes_map_core[rep_id]
-                for force_type, dof_idx in dof_map.items():
-                    F_amplitude[node_core.dofs[dof_idx]] += load_data.get(force_type, 0.0)
+
+        if has_explicit_unbalance:
+            try:
+                selected_node_id = int(unbalanced_node_id)
+            except (TypeError, ValueError):
+                return {"error": "El nodo de desbalance debe ser un ID de nodo válido."}
+
+            rep_id = id_map.get(selected_node_id)
+            if rep_id is None or rep_id not in nodes_map_core:
+                return {"error": f"El nodo de desbalance {selected_node_id} no existe o no pertenece a la estructura analizada."}
+
+            try:
+                direction = np.array(unbalanced_direction, dtype=float).reshape(-1)
+            except (TypeError, ValueError):
+                return {"error": "La dirección del desbalance debe tener componentes numéricas [x, y, z]."}
+
+            if direction.size != 3 or np.linalg.norm(direction) <= 1e-12:
+                return {"error": "La dirección del desbalance debe ser un vector translacional no nulo [x, y, z]."}
+
+            direction = direction / np.linalg.norm(direction)
+            node_core = nodes_map_core[rep_id]
+            for dof_idx, value in enumerate(direction):
+                F_amplitude[node_core.dofs[dof_idx]] = value
+        else:
+            for load_data in loads:
+                original_node_id = load_data.get('node_id')
+                rep_id = id_map.get(original_node_id)
+                if rep_id is not None and rep_id in nodes_map_core:
+                    node_core = nodes_map_core[rep_id]
+                    for force_type, dof_idx in dof_map.items():
+                        F_amplitude[node_core.dofs[dof_idx]] += float(load_data.get(force_type, 0.0) or 0.0)
+
+        if np.linalg.norm(F_amplitude) <= 1e-12:
+            if is_unbalanced:
+                return {"error": "El análisis armónico por desbalance requiere un nodo y una dirección no nula para definir la excitación."}
+            return {"error": "El análisis armónico requiere al menos una carga nodal no nula para definir la excitación."}
 
         freq_range = np.linspace(freq_start, freq_end, num_points)
 
+        constrained_dofs = structure.get_constrained_dofs()
+        free_dofs = np.setdiff1d(np.arange(structure.num_dofs), constrained_dofs)
+        if free_dofs.size == 0:
+            return {"error": "La estructura no tiene grados de libertad libres para análisis armónico."}
+
+        solver_force = F_amplitude
+        if is_unbalanced:
+            force_norm = np.linalg.norm(F_amplitude)
+            if force_norm <= 1e-12:
+                return {"error": "El análisis armónico por desbalance requiere una dirección no nula para definir la excitación."}
+            solver_force = F_amplitude / force_norm
+
+        F_free = solver_force[free_dofs]
+        if np.linalg.norm(F_free) <= 1e-12:
+            return {"error": "La excitación armónica está aplicada solo en grados de libertad restringidos; no genera respuesta dinámica libre."}
+
+        K_free = K_global[free_dofs, :][:, free_dofs]
+        M_free = M_global[free_dofs, :][:, free_dofs]
+        C_free = C_global[free_dofs, :][:, free_dofs]
+
         complex_responses = direct_frequency_response(
-            K_global, M_global, C_global, F_amplitude, freq_range,
+            K_free, M_free, C_free, F_free, freq_range,
             is_unbalanced_force=is_unbalanced,
-            unbalanced_mass_product=unbalanced_me
+            unbalanced_mass_product=unbalanced_me,
+            normalize_unbalanced_direction=not is_unbalanced,
         )
 
-        # Amplitudes reales
         amplitudes = np.abs(complex_responses)
+        free_index_lookup = np.full(structure.num_dofs, -1, dtype=int)
+        free_index_lookup[free_dofs] = np.arange(free_dofs.size)
         
         results = {
             "frequencies_sweep": _to_list(freq_range),
-            "response_amplitudes": {}
+            "response_amplitudes": {},
+            "peak_node_id": None,
+            "peak_frequency": None,
+            "peak_amplitude": None,
         }
+
+        peak_node_id = None
+        peak_frequency = None
+        peak_amplitude = -np.inf
 
         for original_node_id, rep_id in id_map.items():
             if rep_id in nodes_map_core:
                 node_core = nodes_map_core[rep_id]
                 # Magnitud de traslación (norma de ux, uy, uz)
                 node_dofs = node_core.dofs[:3]
-                node_amps = np.sqrt(np.sum(amplitudes[:, node_dofs]**2, axis=1))
+                node_free_indices = free_index_lookup[node_dofs]
+                valid_indices = node_free_indices[node_free_indices >= 0]
+                if valid_indices.size > 0:
+                    node_amps = np.sqrt(np.sum(amplitudes[:, valid_indices]**2, axis=1))
+                else:
+                    node_amps = np.zeros_like(freq_range, dtype=float)
                 results["response_amplitudes"][original_node_id] = _to_list(node_amps)
+
+                finite_mask = np.isfinite(node_amps)
+                if np.any(finite_mask):
+                    finite_indices = np.where(finite_mask)[0]
+                    local_idx = finite_indices[int(np.argmax(node_amps[finite_mask]))]
+                    local_peak = float(node_amps[local_idx])
+                    if local_peak > peak_amplitude:
+                        peak_amplitude = local_peak
+                        peak_frequency = float(freq_range[local_idx])
+                        peak_node_id = int(original_node_id)
+
+        if peak_node_id is not None:
+            results["peak_node_id"] = peak_node_id
+            results["peak_frequency"] = peak_frequency
+            results["peak_amplitude"] = peak_amplitude
 
         return _sanitize_for_json(results)
 

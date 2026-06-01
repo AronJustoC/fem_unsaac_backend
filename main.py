@@ -45,6 +45,7 @@ class LRUCache:
 _static_cache = LRUCache(CACHE_MAX_SIZE)
 _modal_cache = LRUCache(CACHE_MAX_SIZE)
 _modal_viz_cache = LRUCache(50)
+_harmonic_cache = LRUCache(CACHE_MAX_SIZE)
 
 
 def _sort_nested(obj):
@@ -245,10 +246,38 @@ async def perform_modal_analysis(request: ModalAnalysisRequest):
 @app.post("/api/analysis/harmonic", response_model=HarmonicResults, summary="Realiza el analisis armonico (respuesta en frecuencia)")
 async def perform_harmonic_analysis(request: HarmonicAnalysisRequest):
     try:
-        result_dict = run_harmonic_analysis(request.model_dump())
+        request_data = request.model_dump()
+        cache_key = compute_structure_hash(
+            request.structure.model_dump(),
+            {
+                "analysis": "harmonic",
+                "freq_start": request.freq_start,
+                "freq_end": request.freq_end,
+                "num_points": request.num_points,
+                "damping_ratio": request.damping_ratio,
+                "is_unbalanced": request.is_unbalanced,
+                "unbalanced_me": request.unbalanced_me,
+                "unbalanced_node_id": request.unbalanced_node_id,
+                "unbalanced_direction": request.unbalanced_direction,
+                "unbalanced_mass": request.unbalanced_mass,
+                "unbalanced_eccentricity": request.unbalanced_eccentricity,
+            },
+        )
+
+        cached = _harmonic_cache.get(cache_key)
+        if cached is not None:
+            print(f"[CACHE HIT] Harmonic analysis - key: {cache_key[:16]}...")
+            return HarmonicResults(**cached)
+
+        result_dict = run_harmonic_analysis(request_data)
         if "error" in result_dict:
             raise HTTPException(status_code=400, detail=result_dict["error"])
+
+        _harmonic_cache.set(cache_key, result_dict)
+        print(f"[CACHE SET] Harmonic analysis - key: {cache_key[:16]}...")
         return HarmonicResults(**result_dict)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Error inesperado en el analisis armonico: {str(e)}")
@@ -437,4 +466,3 @@ async def update_project(project_id: str, project_data: dict, user=Depends(get_c
     except Exception as e:
         print(f"Error updating project: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-

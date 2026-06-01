@@ -112,6 +112,9 @@ class HarmonicResults(BaseModel):
     # node_id -> [amplitudes para cada frecuencia]
     response_amplitudes: dict[int, list[float]] = Field(
         ..., description="Amplitudes de respuesta por nodo para cada frecuencia")
+    peak_node_id: Optional[int] = Field(None, description="Nodo con la máxima amplitud global")
+    peak_frequency: Optional[float] = Field(None, description="Frecuencia donde ocurre la máxima amplitud global")
+    peak_amplitude: Optional[float] = Field(None, description="Máxima amplitud global de respuesta")
 
 
 class HarmonicAnalysisRequest(BaseModel):
@@ -122,3 +125,10 @@ class HarmonicAnalysisRequest(BaseModel):
     damping_ratio: float = Field(0.05, description="Relación de amortiguamiento (ej, 0.05 para 5%)")
     is_unbalanced: bool = Field(False, description="Si es una fuerza de desbalance proporcional a w^2")
     unbalanced_me: float = Field(0.0, description="Producto masa x excentricidad (m*e)")
+    unbalanced_node_id: Optional[int] = Field(None, description="Nodo donde se aplica la fuerza de desbalance")
+    unbalanced_direction: tuple[float, float, float] = Field(
+        (0.0, 1.0, 0.0),
+        description="Dirección translacional [x, y, z] de la fuerza de desbalance",
+    )
+    unbalanced_mass: float = Field(0.0, description="Masa desbalanceada m (kg)")
+    unbalanced_eccentricity: float = Field(0.0, description="Excentricidad e (m)")
