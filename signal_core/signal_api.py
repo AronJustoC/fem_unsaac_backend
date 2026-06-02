@@ -75,6 +75,15 @@ class FilterRequest(BaseModel):
     order: int = 4
     cutoff_low: Optional[float] = 0.5
     cutoff_high: Optional[float] = 20.0
+    notch_freq: Optional[float] = 60.0
+    quality_factor: float = 30.0
+    n_harmonics: int = 3
+    bandwidth: float = 0.5
+    window_size: int = 11
+    sigma: float = 3.0
+    mad_threshold: float = 6.0
+    alpha: float = 0.2
+    polyorder: int = 2
 
 
 class WaterfallRequest(BaseModel):
@@ -269,14 +278,25 @@ async def apply_filter(request: FilterRequest) -> Dict[str, Any]:
     - bandpass: Pasa-banda
     - bandstop: Rechaza-banda
     - notch: Notch para ruido de línea
+    - harmonic_notch: Notch para frecuencia de línea y armónicos
+    - demean/detrend: Correcciones de base
+    - hampel/mad_despike/impact_guard: Anti-golpes
+    - median/moving_average/exponential/savgol: Suavizados
+    - anti_ski_slope: Detrend + anti-golpes + pasa alto
     """
     try:
         signal_filter = SignalFilter(request.sampling_rate)
         
         amplitude = np.array(request.amplitude)
         
-        if request.filter_type == 'bandpass':
+        if request.filter_type in {'bandpass', 'bandstop'}:
             cutoff = (request.cutoff_low, request.cutoff_high)
+        elif request.filter_type in {'highpass', 'anti_ski_slope'}:
+            cutoff = request.cutoff_low if request.cutoff_low is not None else 0.5
+        elif request.filter_type in {'notch', 'comb', 'harmonic_notch'}:
+            cutoff = request.notch_freq or request.cutoff_high or 60.0
+        elif request.filter_type in {'moving_average'}:
+            cutoff = float(request.window_size)
         else:
             cutoff = request.cutoff_high or 10.0
         
@@ -285,6 +305,14 @@ async def apply_filter(request: FilterRequest) -> Dict[str, Any]:
             filter_type=request.filter_type,
             order=request.order,
             cutoff_freq=cutoff,
+            Q=request.quality_factor,
+            n_harmonics=request.n_harmonics,
+            bandwidth=request.bandwidth,
+            window_size=request.window_size,
+            sigma=request.sigma,
+            threshold=request.mad_threshold,
+            alpha=request.alpha,
+            polyorder=request.polyorder,
         )
         
         return {
@@ -293,6 +321,17 @@ async def apply_filter(request: FilterRequest) -> Dict[str, Any]:
             'filter_type': request.filter_type,
             'order': request.order,
             'cutoff': cutoff,
+            'parameters': {
+                'notch_freq': request.notch_freq,
+                'quality_factor': request.quality_factor,
+                'n_harmonics': request.n_harmonics,
+                'bandwidth': request.bandwidth,
+                'window_size': request.window_size,
+                'sigma': request.sigma,
+                'mad_threshold': request.mad_threshold,
+                'alpha': request.alpha,
+                'polyorder': request.polyorder,
+            },
         }
         
     except Exception as e:

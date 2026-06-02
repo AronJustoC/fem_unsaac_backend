@@ -423,7 +423,9 @@ class SignalFilter:
         amplitude: np.ndarray,
         filter_type: Literal[
             'lowpass', 'highpass', 'bandpass', 'bandstop',
-            'notch', 'comb', 'moving_average'
+            'notch', 'comb', 'harmonic_notch', 'moving_average',
+            'demean', 'detrend', 'median', 'hampel', 'mad_despike',
+            'savgol', 'exponential', 'anti_ski_slope', 'impact_guard'
         ] = 'lowpass',
         order: int = 4,
         cutoff_freq: float | Tuple[float, float] = 10.0,
@@ -442,6 +444,43 @@ class SignalFilter:
         Returns:
             Señal filtrada
         """
+        amplitude = self._clean_array(amplitude)
+
+        if filter_type == 'demean':
+            return amplitude - np.mean(amplitude) if amplitude.size else amplitude
+        if filter_type == 'detrend':
+            return signal.detrend(amplitude, type='linear') if amplitude.size > 1 else amplitude
+        if filter_type == 'median':
+            return self.median_filter(amplitude, kwargs.get('window_size', 5))
+        if filter_type == 'hampel':
+            return self.hampel_filter(
+                amplitude,
+                kwargs.get('window_size', 11),
+                kwargs.get('sigma', 3.0),
+            )
+        if filter_type == 'mad_despike':
+            return self.mad_despike(amplitude, kwargs.get('threshold', 6.0))
+        if filter_type == 'impact_guard':
+            result = self.hampel_filter(
+                amplitude,
+                kwargs.get('window_size', 11),
+                kwargs.get('sigma', 3.0),
+            )
+            return self.mad_despike(result, kwargs.get('threshold', 6.0))
+        if filter_type == 'savgol':
+            return self.savgol_filter(amplitude, kwargs.get('window_size', 11), kwargs.get('polyorder', 2))
+        if filter_type == 'exponential':
+            return self.exponential_smoothing(amplitude, kwargs.get('alpha', 0.2))
+        if filter_type == 'anti_ski_slope':
+            return self.anti_ski_slope(
+                amplitude,
+                highpass_freq=float(cutoff_freq if isinstance(cutoff_freq, (int, float)) else kwargs.get('highpass_freq', 0.5)),
+                order=order,
+                window_size=kwargs.get('window_size', 11),
+                sigma=kwargs.get('sigma', 3.0),
+                threshold=kwargs.get('threshold', 6.0),
+            )
+
         # Convertir cutoff_freq a la forma correcta
         if isinstance(cutoff_freq, (int, float)):
             cutoff = float(cutoff_freq)
@@ -469,6 +508,12 @@ class SignalFilter:
                 kwargs.get('n_harmonics', 5),
                 kwargs.get('bandwidth', 1.0),
             )
+        elif filter_type == 'harmonic_notch':
+            b, a = self.designer.comb_filter(
+                cutoff,
+                kwargs.get('n_harmonics', 3),
+                kwargs.get('bandwidth', 0.5),
+            )
         elif filter_type == 'moving_average':
             b, a = self.designer.moving_average_filter(int(cutoff))
         else:
@@ -483,6 +528,156 @@ class SignalFilter:
             filtered = signal.lfilter(b, a, amplitude)
         
         return filtered
+
+    def _clean_array(self, amplitude: np.ndarray) -> np.ndarray:
+        """Convierte a float64 y rellena NaN/inf para evitar fallos de scipy."""
+        values = np.asarray(amplitude, dtype=np.float64)
+        if values.size == 0:
+            return values
+        if np.all(np.isfinite(values)):
+            return values.copy()
+        finite = np.isfinite(values)
+        if not np.any(finite):
+            return np.zeros_like(values, dtype=np.float64)
+        indices = np.arange(values.size)
+        cleaned = values.copy()
+        cleaned[~finite] = np.interp(indices[~finite], indices[finite], values[finite])
+        return cleaned
+
+    def _odd_window(self, window_size: int | float, n: int, minimum: int = 3) -> int:
+        """Normaliza una ventana a entero impar y compatible con el largo de señal."""
+        if n <= 1:
+            return 1
+        try:
+            raw_window = float(window_size)
+        except (TypeError, ValueError):
+            raw_window = float(minimum)
+        window = int(round(raw_window)) if np.isfinite(raw_window) else minimum
+        window = max(minimum, window)
+        max_window = n if n % 2 == 1 else n - 1
+        window = min(window, max(minimum, max_window))
+        if window % 2 == 0:
+            window = window - 1 if window >= max_window else window + 1
+        return max(1, min(window, max_window))
+
+    def median_filter(self, amplitude: np.ndarray, window_size: int = 5) -> np.ndarray:
+        """Filtro de mediana móvil sin padding a cero en bordes."""
+        values = self._clean_array(amplitude)
+        n = values.size
+        if n < 3:
+            return values
+        window = self._odd_window(window_size, n, minimum=3)
+        radius = window // 2
+        output = np.empty_like(values)
+        for i in range(n):
+            start = max(0, i - radius)
+            end = min(n, i + radius + 1)
+            output[i] = np.median(values[start:end])
+        return output
+
+    def hampel_filter(
+        self,
+        amplitude: np.ndarray,
+        window_size: int = 11,
+        sigma: float = 3.0,
+    ) -> np.ndarray:
+        """
+        Filtro Hampel: reemplaza outliers locales por la mediana de la ventana.
+        Es adecuado para golpes/picos aislados antes de FFT, PSD e integración.
+        """
+        values = self._clean_array(amplitude)
+        n = values.size
+        if n < 3:
+            return values
+        window = self._odd_window(window_size, n, minimum=3)
+        radius = window // 2
+        output = values.copy()
+        sigma = max(0.5, float(sigma))
+
+        for i in range(n):
+            start = max(0, i - radius)
+            end = min(n, i + radius + 1)
+            local = values[start:end]
+            local_median = float(np.median(local))
+            mad = float(np.median(np.abs(local - local_median)))
+            robust_sigma = 1.4826 * mad
+            if robust_sigma > 1e-15 and abs(values[i] - local_median) > sigma * robust_sigma:
+                output[i] = local_median
+        return output
+
+    def mad_despike(self, amplitude: np.ndarray, threshold: float = 6.0) -> np.ndarray:
+        """
+        Detecta picos por MAD global y los reemplaza con interpolación lineal.
+        """
+        values = self._clean_array(amplitude)
+        if values.size < 3:
+            return values
+        median = float(np.median(values))
+        mad = float(np.median(np.abs(values - median)))
+        robust_sigma = 1.4826 * mad
+        if robust_sigma <= 1e-15:
+            return values
+        mask = np.abs(values - median) > max(1.0, float(threshold)) * robust_sigma
+        if not np.any(mask):
+            return values
+        keep = ~mask
+        if not np.any(keep):
+            return np.full_like(values, median)
+        indices = np.arange(values.size)
+        output = values.copy()
+        output[mask] = np.interp(indices[mask], indices[keep], values[keep])
+        return output
+
+    def savgol_filter(
+        self,
+        amplitude: np.ndarray,
+        window_size: int = 11,
+        polyorder: int = 2,
+    ) -> np.ndarray:
+        """Suavizado Savitzky-Golay para preservar forma local."""
+        values = self._clean_array(amplitude)
+        n = values.size
+        if n < 5:
+            return values
+        window = self._odd_window(window_size, n, minimum=5)
+        order = min(max(1, int(polyorder)), window - 2)
+        return signal.savgol_filter(values, window_length=window, polyorder=order, mode='interp')
+
+    def exponential_smoothing(self, amplitude: np.ndarray, alpha: float = 0.2) -> np.ndarray:
+        """Media exponencial simple."""
+        values = self._clean_array(amplitude)
+        if values.size < 2:
+            return values
+        alpha = min(1.0, max(0.001, float(alpha)))
+        output = np.empty_like(values)
+        output[0] = values[0]
+        for i in range(1, values.size):
+            output[i] = alpha * values[i] + (1 - alpha) * output[i - 1]
+        return output
+
+    def anti_ski_slope(
+        self,
+        amplitude: np.ndarray,
+        highpass_freq: float = 0.5,
+        order: int = 2,
+        window_size: int = 11,
+        sigma: float = 3.0,
+        threshold: float = 6.0,
+    ) -> np.ndarray:
+        """
+        Corrección anti ski-slope: detrend + despiking + pasa alto.
+        Reduce energía artificial de muy baja frecuencia antes del análisis espectral.
+        """
+        values = self._clean_array(amplitude)
+        if values.size < 3:
+            return values
+        result = signal.detrend(values, type='linear')
+        result = self.hampel_filter(result, window_size=window_size, sigma=sigma)
+        result = self.mad_despike(result, threshold=threshold)
+        cutoff = min(max(float(highpass_freq), 0.0), self.fs / 2 * 0.95)
+        if cutoff <= 0:
+            return result
+        return self.apply(result, filter_type='highpass', order=max(1, order), cutoff_freq=cutoff)
     
     def apply_cascade(
         self,
