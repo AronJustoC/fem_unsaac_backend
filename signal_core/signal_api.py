@@ -32,6 +32,7 @@ from signal_core import (
     SignalExporter,
     ReportGenerator,
 )
+from signal_core.vibrationdata_compat import analyze_vibrationdata_compat
 
 router = APIRouter(prefix="/api/signal", tags=["Signal Processing"])
 
@@ -111,6 +112,20 @@ class IntegrationRequest(BaseModel):
     time: Optional[List[float]] = None
     double_integrate: bool = False
     highpass_freq: float = 0.5
+
+
+class VibrationDataAnalysisRequest(BaseModel):
+    """Request para cálculos estilo VibrationData/enDAQ."""
+    acceleration: List[float]
+    sampling_rate: Optional[float] = Field(default=None, gt=0)
+    time: Optional[List[float]] = None
+    unit: str = "g"
+    bin_width: float = Field(default=1.0, gt=0)
+    window: str = "hann"
+    overlap: float = Field(default=0.5, ge=0.0, lt=0.96)
+    highpass_hz: float = Field(default=0.5, ge=0.0)
+    freq_range: Optional[tuple[float, float]] = None
+    zero_low_frequency_bins: int = Field(default=0, ge=0, le=10)
 
 
 class CepstrumRequest(BaseModel):
@@ -263,6 +278,33 @@ async def compute_psd(request: PSDRequest) -> Dict[str, Any]:
             'spectral_peaks': peaks,
         }
         
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/vibrationdata-analysis", summary="Análisis VibrationData/enDAQ compatible")
+async def compute_vibrationdata_analysis(request: VibrationDataAnalysisRequest) -> Dict[str, Any]:
+    """
+    Calcula A/V/D, FFT one-sided, Aggregate FFT y PSD Welch con metadatos.
+
+    Este endpoint está pensado para que el frontend renderice gráficas parecidas
+    a VibrationData de Tom Irvine/enDAQ sin duplicar cálculos aproximados en JS.
+    """
+    try:
+        return analyze_vibrationdata_compat(
+            acceleration=request.acceleration,
+            sampling_rate=request.sampling_rate,
+            time=request.time,
+            unit=request.unit,
+            bin_width=request.bin_width,
+            window=request.window,
+            overlap=request.overlap,
+            highpass_hz=request.highpass_hz,
+            freq_range=request.freq_range,
+            zero_low_frequency_bins=request.zero_low_frequency_bins,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

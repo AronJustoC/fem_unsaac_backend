@@ -2,7 +2,7 @@
 
 ## Descripción
 
-**SignalCore** es un módulo completo de procesamiento de señales de vibración basado en el manual de VibrationData Toolbox v13.3. Diseñado específicamente para el análisis de datos de puentes con acelerómetros de 4 columnas (Tiempo, AccX, AccY, AccZ).
+**SignalCore** es un módulo completo de procesamiento de señales de vibración con rutinas compatibles con VibrationData/enDAQ. Diseñado específicamente para el análisis de datos de puentes con acelerómetros de 4 columnas (Tiempo, AccX, AccY, AccZ).
 
 ## Características
 
@@ -107,6 +107,7 @@ El módulo expone endpoints REST para integración con el frontend:
 POST /api/signal/import          - Importar datos
 POST /api/signal/fft            - Análisis FFT
 POST /api/signal/psd            - Análisis PSD
+POST /api/signal/vibrationdata-analysis - A/V/D, FFT, Aggregate FFT y PSD compatible
 POST /api/signal/filter         - Aplicar filtros
 POST /api/signal/integrate      - Integrar señal
 POST /api/signal/envelope       - Análisis de envolvente
@@ -168,7 +169,7 @@ tiempo,acelx,acely,acelz
 ## Autores
 
 - Desarrollado para la tesis de la UNSAAC
-- Basado en VibrationData Toolbox / vibrationdata_App v13.3
+- Compatible con convenciones VibrationData Toolbox / enDAQ
 
 ## Licencia
 

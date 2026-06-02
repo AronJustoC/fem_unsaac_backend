@@ -35,6 +35,7 @@ from .integration import SignalIntegrator
 from .envelope import EnvelopeAnalyzer
 from .cepstrum import CepstrumAnalyzer
 from .statistics import SignalStatistics
+from .vibrationdata_compat import analyze_vibrationdata_compat
 from .importer import SignalImporter, BridgeDataImporter
 from .exporter import SignalExporter, ReportGenerator
 from .signal_api import router as signal_api_router
@@ -59,6 +60,7 @@ __all__ = [
     'EnvelopeAnalyzer',
     'CepstrumAnalyzer',
     'SignalStatistics',
+    'analyze_vibrationdata_compat',
     
     # I/O
     'SignalImporter',
