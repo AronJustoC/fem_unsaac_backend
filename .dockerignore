@@ -1,0 +1,24 @@
+.git
+.gitignore
+.dockerignore
+Dockerfile
+
+# Entornos/secretos locales
+.env
+.env.*
+!.env.example
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Artefactos locales
+*.log
+coverage.xml
+htmlcov
+.dist
+build
+dist
