@@ -49,12 +49,21 @@ def _compute_element_harmonic_stress_amplitudes(element, u_global_complex: np.nd
     f_local = element.k_local @ u_local
 
     E = element.material['E']
-    A = element.section['area']
-    Iz = element.section['Iz']
-    Iy = element.section['Iy']
-    J = element.section['J']
+    A = element.section.get('area', 0.001)
+    Iz = element.section.get('Iz', 1e-8)
+    Iy = element.section.get('Iy', 1e-8)
+    J = element.section.get('J', 1e-8)
     h = element.section.get('height') or 0.1
     b = element.section.get('width') or 0.1
+
+    if not A or A <= 0:
+        A = 0.001
+    if not Iz or Iz <= 0:
+        Iz = 1e-8
+    if not Iy or Iy <= 0:
+        Iy = 1e-8
+    if not J or J <= 0:
+        J = 1e-8
     y_max = h / 2.0
     z_max = b / 2.0
     kappa = 5.0 / 6.0
@@ -172,15 +181,24 @@ def _build_structure(structure_data: dict, mass_type: str = 'lumped') -> tuple[S
 
     # 3. Crear Mapa de Materiales y Secciones
     for m in materials:
+        if m.get("E") is None or m.get("nu") is None or m.get("rho") is None:
+            raise ValueError(f"Material {m.get('id')} tiene propiedades requeridas nulas: E={m.get('E')}, nu={m.get('nu')}, rho={m.get('rho')}")
         if m.get("G") is None:
             m["G"] = m["E"] / (2 * (1 + m["nu"]))
     
-    # Normalizar secciones: aceptar tanto 'A' como 'area'
+    _SECTION_REQUIRED_KEYS = ("area", "Iy", "Iz", "J")
     for s in sections:
         if "A" in s and "area" not in s:
             s["area"] = s["A"]
         elif "area" not in s and "A" not in s:
             raise ValueError(f"Section {s.get('id')} must have either 'A' or 'area' property")
+        missing = [k for k in _SECTION_REQUIRED_KEYS if s.get(k) is None]
+        if missing:
+            raise ValueError(f"Section {s.get('id')} tiene propiedades requeridas nulas: {missing}. Datos: {s}")
+        if s.get("height") is None:
+            s["height"] = 0.1
+        if s.get("width") is None:
+            s["width"] = 0.1
     
     materials_map = {m['id']: m for m in materials}
     sections_map = {s['id']: s for s in sections}

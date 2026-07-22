@@ -138,20 +138,27 @@ class Element:
         """Calcula los esfuerzos de Von Mises en los dos extremos del elemento.
         u_global: Vector de desplazamientos globales (solo los 12 DOFs del elemento).
         """
-        # Desplazamientos locales u_local = T @ u_global
         u_local = self.T @ u_global
         
         L = self.L
         E = self.material['E']
         G = self.material.get('G', E / (2 * (1 + self.material.get('nu', 0.3))))
-        A = self.section['area']
-        Iz = self.section['Iz']
-        Iy = self.section['Iy']
-        J = self.section['J']
+        A = self.section.get('area', 0.001)
+        Iz = self.section.get('Iz', 1e-8)
+        Iy = self.section.get('Iy', 1e-8)
+        J = self.section.get('J', 1e-8)
         
-        # Dimensiones para fibras extremas (usar valores por defecto si no existen)
-        h = self.section.get('height', 0.1)
-        b = self.section.get('width', 0.1)
+        if not A or A <= 0:
+            A = 0.001
+        if not Iz or Iz <= 0:
+            Iz = 1e-8
+        if not Iy or Iy <= 0:
+            Iy = 1e-8
+        if not J or J <= 0:
+            J = 1e-8
+        
+        h = self.section.get('height') or 0.1
+        b = self.section.get('width') or 0.1
         
         y_max = h / 2.0
         z_max = b / 2.0
