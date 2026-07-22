@@ -1,5 +1,6 @@
 import plotly.graph_objects as go
 import numpy as np
+import re
 
 
 def get_theme_config(theme="dark"):
@@ -48,6 +49,282 @@ def process_nodes(structure_data):
     return nodes
 
 
+def _positive_float(value, fallback):
+    try:
+        parsed = float(value)
+        return parsed if np.isfinite(parsed) and parsed > 0 else fallback
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _infer_i_dimensions(area_m2, inertia_m4, height_to_width_ratio):
+    """Recupera h, b y t de un perfil H/I de espesor uniforme.
+
+    Usa A e I fuerte, por lo que también respeta modelos a escala cuyo nombre
+    conserva la designación nominal (p. ej. H420x180 dibujado a escala 1:10).
+    """
+    if not inertia_m4 or inertia_m4 <= 0 or height_to_width_ratio <= 0:
+        return None
+
+    width_to_height = 1.0 / height_to_width_ratio
+
+    def properties(height):
+        width = width_to_height * height
+        thickness = area_m2 / (height + 2.0 * width)
+        if thickness <= 0 or 2.0 * thickness >= height or thickness >= width:
+            return None
+        web_height = height - 2.0 * thickness
+        strong_inertia = (
+            2.0 * (
+                width * thickness**3 / 12.0
+                + width * thickness * ((height - thickness) / 2.0) ** 2
+            )
+            + thickness * web_height**3 / 12.0
+        )
+        return strong_inertia, width, thickness
+
+    characteristic = max(np.sqrt(area_m2), 1e-6)
+    candidates = np.geomspace(characteristic * 0.25, characteristic * 40.0, 240)
+    previous = None
+    bracket = None
+    for height in candidates:
+        current = properties(float(height))
+        if current is None:
+            continue
+        delta = current[0] - inertia_m4
+        if previous is not None and previous[1] * delta <= 0:
+            bracket = (previous[0], float(height))
+            break
+        previous = (float(height), delta)
+
+    if bracket is None:
+        return None
+
+    low, high = bracket
+    for _ in range(70):
+        mid = (low + high) / 2.0
+        current = properties(mid)
+        if current is None or current[0] < inertia_m4:
+            low = mid
+        else:
+            high = mid
+
+    height = (low + high) / 2.0
+    _, width, thickness = properties(height)
+    return height, width, thickness
+
+
+def _section_geometry(section):
+    """Normaliza la geometría de la sección y devuelve dimensiones en mm.
+
+    Los proyectos antiguos solo guardaban A/I/J. Para no romperlos se infiere
+    el tipo por el nombre y un tamaño razonable por el área o la designación IPE.
+    """
+    name = str(section.get('name') or '').strip().lower()
+    raw_shape = str(section.get('visual_shape') or section.get('shape') or '').strip().lower()
+
+    if raw_shape in {'h', 'hea', 'heb', 'wide_flange'}:
+        shape = 'h'
+    elif raw_shape in {'i', 'ipe'}:
+        shape = 'i'
+    elif raw_shape in {'circle', 'circular', 'round', 'pipe', 'tube'}:
+        shape = 'circular'
+    elif raw_shape in {'rect', 'rectangle', 'rectangular', 'square'}:
+        shape = 'rectangular'
+    elif any(token in name for token in ('hea', 'heb', 'perfil h', 'viga h')) or re.search(r'(^|\s)h\s*\d+\s*x', name):
+        shape = 'h'
+    elif any(token in name for token in ('ipe', 'perfil i', 'viga i')):
+        shape = 'i'
+    elif any(token in name for token in ('circular', 'tubo', 'pipe')):
+        shape = 'circular'
+    else:
+        shape = 'rectangular'
+
+    area_m2 = _positive_float(section.get('area', section.get('A')), 0.01)
+    characteristic_m = max(np.sqrt(area_m2), 0.02)
+    dimension_match = re.search(r'(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)', name)
+
+    inferred_height_m = None
+    inferred_width_m = None
+    inferred_thickness_m = None
+    if shape in {'i', 'h'} and dimension_match:
+        nominal_height = float(dimension_match.group(1))
+        nominal_width = float(dimension_match.group(2))
+        strong_inertia = max(
+            _positive_float(section.get('Iy'), 0.0),
+            _positive_float(section.get('Iz'), 0.0),
+        )
+        inferred = _infer_i_dimensions(
+            area_m2,
+            strong_inertia,
+            nominal_height / nominal_width,
+        )
+        if inferred:
+            inferred_height_m, inferred_width_m, inferred_thickness_m = inferred
+    elif shape == 'i':
+        designation = re.search(r'ipe\s*[- ]?\s*(\d{2,4})', name)
+        if designation:
+            inferred_height_m = float(designation.group(1)) / 1000.0
+            inferred_width_m = inferred_height_m * 0.5
+    elif shape == 'rectangular' and dimension_match:
+        # El área determina la escala real; el nombre solo aporta la proporción.
+        # Así 80x40 con A=32 mm² se dibuja 8x4 mm, no 80x40 mm.
+        ratio = float(dimension_match.group(1)) / float(dimension_match.group(2))
+        inferred_height_m = np.sqrt(area_m2 * ratio)
+        inferred_width_m = np.sqrt(area_m2 / ratio)
+    elif shape == 'rectangular':
+        # Rectángulo equivalente dinámico a partir de A e inercia fuerte.
+        # Permite visualizar secciones importadas aunque su nombre no codifique medidas.
+        strong_inertia = max(
+            _positive_float(section.get('Iy'), 0.0),
+            _positive_float(section.get('Iz'), 0.0),
+        )
+        if strong_inertia > 0:
+            candidate_height = np.sqrt(12.0 * strong_inertia / area_m2)
+            candidate_width = area_m2 / candidate_height
+            if np.isfinite(candidate_height) and np.isfinite(candidate_width):
+                inferred_height_m = max(candidate_height, candidate_width)
+                inferred_width_m = min(candidate_height, candidate_width)
+
+    height_m = _positive_float(
+        section.get('visual_height', section.get('height')),
+        inferred_height_m or (characteristic_m * (2.0 if shape in {'i', 'h'} else 1.0)),
+    )
+    width_m = _positive_float(
+        section.get('visual_width', section.get('width')),
+        inferred_width_m or (height_m * 0.5 if shape in {'i', 'h'} else characteristic_m),
+    )
+    flange_m = _positive_float(
+        section.get('visual_flange_thickness', section.get('flange_thickness')),
+        inferred_thickness_m or height_m * 0.08,
+    )
+    web_m = _positive_float(
+        section.get('visual_web_thickness', section.get('web_thickness')),
+        inferred_thickness_m or width_m * 0.08,
+    )
+
+    # Mantener una sección físicamente dibujable incluso con datos importados erróneos.
+    flange_m = min(flange_m, height_m * 0.45)
+    web_m = min(web_m, width_m * 0.9)
+
+    return {
+        'shape': shape,
+        'height': height_m * 1000.0,
+        'width': width_m * 1000.0,
+        'flange_thickness': flange_m * 1000.0,
+        'web_thickness': web_m * 1000.0,
+    }
+
+
+def _local_axes(c1, c2, rotation_deg=0.0):
+    axis = np.asarray(c2, dtype=float) - np.asarray(c1, dtype=float)
+    length = np.linalg.norm(axis)
+    if length <= 1e-9:
+        return None
+
+    local_x = axis / length
+    helper = np.array([0.0, 0.0, 1.0])
+    if abs(np.dot(local_x, helper)) > 0.9:
+        # Para montantes verticales del Bailey: ancho fuera del plano global Y
+        # y altura dentro del plano lateral global X-Z.
+        helper = np.array([1.0, 0.0, 0.0])
+    local_y = np.cross(helper, local_x)
+    local_y /= np.linalg.norm(local_y)
+    local_z = np.cross(local_x, local_y)
+    local_z /= np.linalg.norm(local_z)
+
+    angle = np.deg2rad(_positive_float(abs(rotation_deg), 0.0))
+    if float(rotation_deg or 0.0) < 0:
+        angle *= -1.0
+    if abs(angle) > 1e-12:
+        cos_a, sin_a = np.cos(angle), np.sin(angle)
+        rotated_y = cos_a * local_y + sin_a * local_z
+        rotated_z = -sin_a * local_y + cos_a * local_z
+        local_y, local_z = rotated_y, rotated_z
+    return local_y, local_z
+
+
+def _append_box(mesh, c1, c2, local_y, local_z, width, height, hover_text, element_id, offset_y=0.0, offset_z=0.0):
+    base = len(mesh['x'])
+    offsets = [
+        (-width / 2, -height / 2),
+        (width / 2, -height / 2),
+        (width / 2, height / 2),
+        (-width / 2, height / 2),
+    ]
+    for point in (np.asarray(c1, dtype=float), np.asarray(c2, dtype=float)):
+        center = point + local_y * offset_y + local_z * offset_z
+        for dy, dz in offsets:
+            vertex = center + local_y * dy + local_z * dz
+            mesh['x'].append(float(vertex[0]))
+            mesh['y'].append(float(vertex[1]))
+            mesh['z'].append(float(vertex[2]))
+            mesh['text'].append(hover_text)
+            mesh['customdata'].append(element_id)
+
+    faces = [
+        (0, 2, 1), (0, 3, 2),
+        (4, 5, 6), (4, 6, 7),
+        (0, 1, 5), (0, 5, 4),
+        (1, 2, 6), (1, 6, 5),
+        (2, 3, 7), (2, 7, 6),
+        (3, 0, 4), (3, 4, 7),
+    ]
+    for i, j, k in faces:
+        mesh['i'].append(base + i)
+        mesh['j'].append(base + j)
+        mesh['k'].append(base + k)
+
+
+def _append_cylinder(mesh, c1, c2, local_y, local_z, diameter, hover_text, element_id, segments=16):
+    base = len(mesh['x'])
+    radius = diameter / 2.0
+    for point in (np.asarray(c1, dtype=float), np.asarray(c2, dtype=float)):
+        for index in range(segments):
+            angle = 2.0 * np.pi * index / segments
+            vertex = point + local_y * (radius * np.cos(angle)) + local_z * (radius * np.sin(angle))
+            mesh['x'].append(float(vertex[0]))
+            mesh['y'].append(float(vertex[1]))
+            mesh['z'].append(float(vertex[2]))
+            mesh['text'].append(hover_text)
+            mesh['customdata'].append(element_id)
+
+    for index in range(segments):
+        nxt = (index + 1) % segments
+        a, b = base + index, base + nxt
+        c, d = base + segments + index, base + segments + nxt
+        mesh['i'].extend([a, a])
+        mesh['j'].extend([b, d])
+        mesh['k'].extend([d, c])
+
+    # Tapas trianguladas como abanico; no requieren vértices centrales adicionales.
+    for index in range(1, segments - 1):
+        mesh['i'].extend([base, base + segments])
+        mesh['j'].extend([base + index + 1, base + segments + index])
+        mesh['k'].extend([base + index, base + segments + index + 1])
+
+
+def _append_element_solid(mesh, c1, c2, geometry, hover_text, element_id, rotation_deg=0.0):
+    axes = _local_axes(c1, c2, rotation_deg=rotation_deg)
+    if axes is None:
+        return False
+    local_y, local_z = axes
+
+    if geometry['shape'] == 'circular':
+        _append_cylinder(mesh, c1, c2, local_y, local_z, geometry['width'], hover_text, element_id)
+    elif geometry['shape'] in {'i', 'h'}:
+        height = geometry['height']
+        flange = geometry['flange_thickness']
+        web_height = max(height - 2.0 * flange, height * 0.1)
+        flange_offset = (height - flange) / 2.0
+        _append_box(mesh, c1, c2, local_y, local_z, geometry['width'], flange, hover_text, element_id, offset_z=flange_offset)
+        _append_box(mesh, c1, c2, local_y, local_z, geometry['width'], flange, hover_text, element_id, offset_z=-flange_offset)
+        _append_box(mesh, c1, c2, local_y, local_z, geometry['web_thickness'], web_height, hover_text, element_id)
+    else:
+        _append_box(mesh, c1, c2, local_y, local_z, geometry['width'], geometry['height'], hover_text, element_id)
+    return True
+
+
 def add_elements_to_figure(fig, elements, nodes, materials, sections, palette):
     node_map = {n['id']: n for n in nodes}
     section_ids = sorted(list(set(el.get('section_id')
@@ -62,10 +339,13 @@ def add_elements_to_figure(fig, elements, nodes, materials, sections, palette):
 
     for sid, els in sections_elements.items():
         ex, ey, ez = [], [], []
-        mid_x, mid_y, mid_z, mid_text = [], [], [], []
+        ex_customdata = []
+        mid_x, mid_y, mid_z, mid_text, mid_labels = [], [], [], [], []
+        mesh = {'x': [], 'y': [], 'z': [], 'i': [], 'j': [], 'k': [], 'text': [], 'customdata': []}
 
         section_info = sections.get(sid, {})
         section_name = section_info.get('name', f"Sec {sid}")
+        geometry = _section_geometry(section_info)
 
         for el in els:
             n1 = node_map.get(el['node_ids'][0])
@@ -75,6 +355,7 @@ def add_elements_to_figure(fig, elements, nodes, materials, sections, palette):
                 ex.extend([c1[0], c2[0], None])
                 ey.extend([c1[1], c2[1], None])
                 ez.extend([c1[2], c2[2], None])
+                ex_customdata.extend([el['id'], el['id'], None])
 
                 mid_x.append((c1[0] + c2[0]) / 2)
                 mid_y.append((c1[1] + c2[1]) / 2)
@@ -82,29 +363,69 @@ def add_elements_to_figure(fig, elements, nodes, materials, sections, palette):
 
                 mat_id = el.get('material_id')
                 mat_name = materials.get(mat_id, {}).get('name', f"M{mat_id}")
-                mid_text.append(f"<b>Elemento {el['id']}</b><br>Sección: {section_name}<br>Material: {mat_name}")
+                shape_label = {
+                    'i': 'Perfil I',
+                    'h': 'Perfil H',
+                    'circular': 'Circular',
+                    'rectangular': 'Rectangular',
+                }[geometry['shape']]
+                rotation_deg = el.get('visual_rotation_deg', section_info.get('visual_rotation_deg', 0.0)) or 0.0
+                hover_text = (
+                    f"<b>Elemento {el['id']}</b><br>Sección: {section_name}"
+                    f"<br>Forma: {shape_label}<br>Dimensiones: "
+                    f"{geometry['height']:.1f} × {geometry['width']:.1f} mm"
+                    f"<br>Material: {mat_name}"
+                )
+                mid_text.append(hover_text)
+                mid_labels.append(f"E{el['id']}")
+                _append_element_solid(
+                    mesh,
+                    c1,
+                    c2,
+                    geometry,
+                    hover_text,
+                    el['id'],
+                    rotation_deg=rotation_deg,
+                )
 
         if ex:
             color = color_map.get(sid, palette[0])
+            if mesh['x']:
+                fig.add_trace(go.Mesh3d(
+                    x=mesh['x'], y=mesh['y'], z=mesh['z'],
+                    i=mesh['i'], j=mesh['j'], k=mesh['k'],
+                    color=color,
+                    opacity=0.92,
+                    flatshading=True,
+                    lighting=dict(ambient=0.55, diffuse=0.8, specular=0.35, roughness=0.55, fresnel=0.15),
+                    lightposition=dict(x=2000, y=2500, z=3500),
+                    name=section_name,
+                    text=mesh['text'],
+                    customdata=mesh['customdata'],
+                    hovertemplate='%{text}<extra></extra>',
+                    legendgroup=f'sec_{sid}',
+                    showlegend=True,
+                ))
             fig.add_trace(go.Scatter3d(
                 x=ex, y=ey, z=ez,
                 mode='lines',
-                line=dict(color=color_map[sid], width=5),
-                name=section_name,
-                hoverinfo='text',
-                text=mid_text,
+                line=dict(color=color, width=2),
+                name=f'Eje · {section_name}',
+                customdata=ex_customdata,
+                hovertemplate='<b>Elemento %{customdata}</b><br>Haz clic para inspeccionar matrices<extra></extra>',
                 legendgroup=f'sec_{sid}',
-                showlegend=True
+                showlegend=not bool(mesh['x']),
+                opacity=0.55,
             ))
             fig.add_trace(go.Scatter3d(
                 x=mid_x, y=mid_y, z=mid_z,
                 mode='markers',
                 marker=dict(size=2, opacity=0, color=color),
-                text=[f"E{e['id']}" for e in els],
+                text=mid_labels,
                 hovertext=mid_text,
                 hoverinfo='text',
                 showlegend=False,
-                legendgroup=f"group{sid}"
+                legendgroup=f'sec_{sid}'
             ))
 
 
@@ -271,11 +592,13 @@ def apply_layout_config(fig, nodes, cfg):
         all_coords = np.array([n['coords'] for n in nodes])
         min_coords = np.min(all_coords, axis=0)
         max_coords = np.max(all_coords, axis=0)
-        center = (min_coords + max_coords) / 2
+        global_span = max(float(np.max(max_coords - min_coords)), 1000.0)
         
         def get_range(min_v, max_v):
             span = max_v - min_v
-            margin = span * 0.2 if span > 1e-6 else 100.0 * 0.4
+            # En ejes planos se necesita espacio para ver el volumen de la sección,
+            # no un rango de solo ±40 mm que recorte perfiles de 100–300 mm.
+            margin = span * 0.2 if span > 1e-6 else max(global_span * 0.12, 150.0)
             return [min_v - margin, max_v + margin]
 
         rx = get_range(min_coords[0], max_coords[0])
@@ -411,6 +734,7 @@ def get_deformed_traces(
     for sid, els in sections_elements.items():
         bx, by, bz = [], [], []
         dx, dy, dz = [], [], []
+        element_ids = []
         for el in els:
             n1, n2 = node_map.get(el['node_ids'][0]), node_map.get(el['node_ids'][1])
             if not (n1 and n2): continue
@@ -430,6 +754,7 @@ def get_deformed_traces(
                 )
                 bx.extend(px_b + [None]); by.extend(py_b + [None]); bz.extend(pz_b + [None])
                 dx.extend(px_d + [None]); dy.extend(py_d + [None]); dz.extend(pz_d + [None])
+                element_ids.extend([el['id']] * len(px_b) + [None])
             except:
                 bx.extend([float(n1['coords'][0]), float(n2['coords'][0]), None])
                 by.extend([float(n1['coords'][1]), float(n2['coords'][1]), None])
@@ -437,6 +762,7 @@ def get_deformed_traces(
                 dx.extend([float(d1[0]*1000), float(d2[0]*1000), None])
                 dy.extend([float(d1[1]*1000), float(d2[1]*1000), None])
                 dz.extend([float(d1[2]*1000), float(d2[2]*1000), None])
+                element_ids.extend([el['id'], el['id'], None])
 
         final_x = [clean(bx[i] + dx[i]*scale) if bx[i] is not None else None for i in range(len(bx))]
         final_y = [clean(by[i] + dy[i]*scale) if by[i] is not None else None for i in range(len(by))]
@@ -453,9 +779,13 @@ def get_deformed_traces(
             cdata = []
             for i in range(len(bx)):
                 if bx[i] is None:
-                    cdata.append([None] * 6)
+                    cdata.append([None] * 7)
                 else:
-                    cdata.append([clean(bx[i]), clean(by[i]), clean(bz[i]), clean(dx[i]), clean(dy[i]), clean(dz[i])])
+                    cdata.append([
+                        clean(bx[i]), clean(by[i]), clean(bz[i]),
+                        clean(dx[i]), clean(dy[i]), clean(dz[i]),
+                        element_ids[i],
+                    ])
             trace_kwargs["customdata"] = cdata
 
         if include_hover:
@@ -485,7 +815,11 @@ def generate_results_figure(
     deformed_color = '#ff00ff'
 
     for trace in fig.data:
-        if isinstance(trace, go.Scatter3d):
+        if isinstance(trace, go.Mesh3d):
+            # En resultados, el sólido original funciona como referencia y no debe
+            # ocultar la línea deformada/modal superpuesta.
+            trace.update(opacity=ghost_opacity, hoverinfo='skip', showlegend=False)
+        elif isinstance(trace, go.Scatter3d):
             mode = getattr(trace, 'mode', '') or ''
             if mode == 'lines':
                 orig_color = '#888888'
@@ -599,4 +933,3 @@ def generate_results_figure(
     )
 
     return fig
-
