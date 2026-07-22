@@ -38,6 +38,13 @@ class Section(BaseModel):
                       description="Momento de inercia alrededor de eje local y")
     J: float = Field(..., gt=0,
                      description="Constante torsional")
+    height: Optional[float] = Field(None, gt=0, description="Altura o fibra extrema total de la seccion (m), usada para esfuerzos")
+    width: Optional[float] = Field(None, gt=0, description="Ancho o fibra extrema total de la seccion (m), usado para esfuerzos")
+    visual_shape: Optional[str] = Field(None, description="Forma solo grafica: h, i, rectangular o circular")
+    visual_height: Optional[float] = Field(None, gt=0, description="Altura solo grafica de la seccion (m)")
+    visual_width: Optional[float] = Field(None, gt=0, description="Ancho o diametro solo grafico de la seccion (m)")
+    visual_web_thickness: Optional[float] = Field(None, gt=0, description="Espesor grafico del alma H/I (m)")
+    visual_flange_thickness: Optional[float] = Field(None, gt=0, description="Espesor grafico del ala H/I (m)")
     
     model_config = ConfigDict(populate_by_name=True, extra='ignore')
 
@@ -51,6 +58,7 @@ class Element(BaseModel):
                              description="ID del material asignada al elemento")
     section_id: int = Field(...,
                             description="ID de la seccion asignada al elemento")
+    visual_rotation_deg: float = Field(0.0, description="Giro solo grafico de la seccion alrededor del eje local del elemento")
     
     model_config = ConfigDict(extra='ignore')
 
@@ -111,7 +119,19 @@ class HarmonicResults(BaseModel):
                                            description="Rango de frecuencias analizadas")
     # node_id -> [amplitudes para cada frecuencia]
     response_amplitudes: dict[int, list[float]] = Field(
-        ..., description="Amplitudes de respuesta por nodo para cada frecuencia")
+        ..., description="Amplitudes de desplazamiento traslacional por nodo para cada frecuencia")
+    node_response_series: dict[int, dict[str, list[float]]] = Field(
+        default_factory=dict,
+        description="Series por nodo: desplazamiento, velocidad, aceleracion y esfuerzo alternante",
+    )
+    node_displacement_components: dict[int, dict[str, list[float]]] = Field(
+        default_factory=dict,
+        description="Componentes complejas de desplazamiento translacional por nodo para animar la respuesta armonica",
+    )
+    node_peak_summary: dict[int, dict[str, float]] = Field(
+        default_factory=dict,
+        description="Resumen por nodo en la frecuencia de pico de desplazamiento y pico de esfuerzo",
+    )
     peak_node_id: Optional[int] = Field(None, description="Nodo con la máxima amplitud global")
     peak_frequency: Optional[float] = Field(None, description="Frecuencia donde ocurre la máxima amplitud global")
     peak_amplitude: Optional[float] = Field(None, description="Máxima amplitud global de respuesta")

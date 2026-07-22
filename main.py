@@ -4,6 +4,7 @@ import hashlib
 import json
 from collections import OrderedDict
 from threading import Lock
+from typing import Literal
 
 from schemas.structure_schemas import StructureInput, StaticResults, ModalResults, HarmonicAnalysisRequest, HarmonicResults
 
@@ -46,6 +47,9 @@ _static_cache = LRUCache(CACHE_MAX_SIZE)
 _modal_cache = LRUCache(CACHE_MAX_SIZE)
 _modal_viz_cache = LRUCache(50)
 _harmonic_cache = LRUCache(CACHE_MAX_SIZE)
+_element_matrix_cache = LRUCache(CACHE_MAX_SIZE)
+_global_matrix_bundle_cache = LRUCache(20)
+_impedance_matrix_bundle_cache = LRUCache(20)
 
 
 def _sort_nested(obj):
@@ -64,9 +68,18 @@ def compute_structure_hash(structure_data: dict, extra_params: dict | None = Non
     
     json_str = json.dumps(hash_input, sort_keys=True, separators=(',', ':'))
     return hashlib.sha256(json_str.encode('utf-8')).hexdigest()
-from analysis_core.api_adapters import run_static_analysis, run_modal_analysis, run_harmonic_analysis
+from analysis_core.api_adapters import (
+    build_global_matrix_bundle,
+    build_impedance_matrix_bundle,
+    get_element_matrices,
+    get_global_matrix_view,
+    get_impedance_matrix_view,
+    run_static_analysis,
+    run_modal_analysis,
+    run_harmonic_analysis,
+)
 from analysis_core.analisis_modal_3d.data.engineering_library import get_library
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi import Depends
 from supabase_client import get_current_user, supabase
 from tasks import run_analysis_task
@@ -158,6 +171,31 @@ class ModalAnalysisRequest(BaseModel):
     structure: StructureInput
     num_modes: int
 
+
+class ElementMatricesRequest(BaseModel):
+    structure: StructureInput
+    element_id: int
+
+
+class GlobalMatrixViewRequest(BaseModel):
+    structure: StructureInput
+    matrix_kind: Literal['stiffness', 'mass'] = 'stiffness'
+    matrix_scope: Literal['full', 'free'] = 'full'
+    row_start: int = Field(0, ge=0)
+    col_start: int = Field(0, ge=0)
+    window_size: int = Field(12, ge=6, le=36)
+    heatmap_bins: int = Field(64, ge=16, le=120)
+
+class ImpedanceMatrixViewRequest(BaseModel):
+    structure: StructureInput
+    frequency_hz: float = Field(..., ge=0)
+    damping_ratio: float = Field(0.05, ge=0)
+    matrix_scope: Literal['full', 'free'] = 'free'
+    row_start: int = Field(0, ge=0)
+    col_start: int = Field(0, ge=0)
+    window_size: int = Field(12, ge=6, le=36)
+    heatmap_bins: int = Field(64, ge=16, le=120)
+
 class AnalysisRequest(BaseModel):
     project_id: str
     analysis_type: str
@@ -241,6 +279,94 @@ async def perform_modal_analysis(request: ModalAnalysisRequest):
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Error inesperado en el analisis modal: {str(e)}")
+
+
+@app.post("/api/analysis/element-matrices", summary="Obtiene matrices FEM de un elemento")
+async def element_matrices(request: ElementMatricesRequest):
+    structure_data = request.structure.model_dump()
+    cache_key = compute_structure_hash(
+        structure_data,
+        {"analysis": "element-matrices", "element_id": request.element_id},
+    )
+    cached = _element_matrix_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    result = get_element_matrices(structure_data, request.element_id)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    _element_matrix_cache.set(cache_key, result)
+    return result
+
+
+@app.post("/api/analysis/global-matrices", summary="Explora matrices globales ensambladas")
+async def global_matrices(request: GlobalMatrixViewRequest):
+    """Devuelve un mapa completo y una ventana numérica de K/M o Kff/Mff."""
+    structure_data = request.structure.model_dump()
+    bundle_key = compute_structure_hash(
+        structure_data,
+        {"analysis": "global-matrix-bundle"},
+    )
+    bundle = _global_matrix_bundle_cache.get(bundle_key)
+    if bundle is None:
+        try:
+            bundle = build_global_matrix_bundle(structure_data)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"No se pudo ensamblar K/M: {exc}") from exc
+        _global_matrix_bundle_cache.set(bundle_key, bundle)
+
+    result = get_global_matrix_view(
+        bundle,
+        matrix_kind=request.matrix_kind,
+        matrix_scope=request.matrix_scope,
+        row_start=request.row_start,
+        col_start=request.col_start,
+        window_size=request.window_size,
+        heatmap_bins=request.heatmap_bins,
+    )
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@app.post("/api/analysis/impedance-matrix", summary="Explora la matriz de impedancia dinamica Z(w) = K - w^2 M + i w C")
+async def impedance_matrix(request: ImpedanceMatrixViewRequest):
+    """Devuelve un mapa completo y una ventana numérica (Re/Im) de Z(ω) para una frecuencia dada."""
+    structure_data = request.structure.model_dump()
+
+    bundle_key = compute_structure_hash(structure_data, {"analysis": "global-matrix-bundle"})
+    km_bundle = _global_matrix_bundle_cache.get(bundle_key)
+    if km_bundle is None:
+        try:
+            km_bundle = build_global_matrix_bundle(structure_data)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"No se pudo ensamblar K/M: {exc}") from exc
+        _global_matrix_bundle_cache.set(bundle_key, km_bundle)
+
+    impedance_key = compute_structure_hash(
+        structure_data,
+        {"analysis": "impedance-matrix-bundle", "damping_ratio": request.damping_ratio},
+    )
+    impedance_bundle = _impedance_matrix_bundle_cache.get(impedance_key)
+    if impedance_bundle is None:
+        try:
+            impedance_bundle = build_impedance_matrix_bundle(km_bundle, damping_ratio=request.damping_ratio)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"No se pudo ensamblar la matriz de impedancia: {exc}") from exc
+        _impedance_matrix_bundle_cache.set(impedance_key, impedance_bundle)
+
+    result = get_impedance_matrix_view(
+        impedance_bundle,
+        frequency_hz=request.frequency_hz,
+        matrix_scope=request.matrix_scope,
+        row_start=request.row_start,
+        col_start=request.col_start,
+        window_size=request.window_size,
+        heatmap_bins=request.heatmap_bins,
+    )
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
 
 
 @app.post("/api/analysis/harmonic", response_model=HarmonicResults, summary="Realiza el analisis armonico (respuesta en frecuencia)")

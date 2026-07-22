@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.sparse import issparse
+from scipy import sparse
 from .analisis_modal_3d.structures.structure import Structure
 from .analisis_modal_3d.structures.node import Node as CoreNode
 from .analisis_modal_3d.structures.element import Element as CoreElement
@@ -34,6 +35,57 @@ def _to_list(data):
     if isinstance(data, np.ndarray):
         return data.tolist()
     return data
+
+
+def _compute_element_harmonic_stress_amplitudes(element, u_global_complex: np.ndarray) -> list[float]:
+    """Devuelve amplitudes alternantes de Von Mises en los dos extremos del elemento.
+
+    La respuesta armónica U(ω) es compleja. Para reporte nodal usamos una envolvente
+    conservadora compatible con get_stresses(): se recuperan fuerzas internas locales
+    complejas, se toman amplitudes por componente y se combina axial + flexión +
+    cortante/torsión para obtener una amplitud escalar de esfuerzo alternante.
+    """
+    u_local = element.T @ u_global_complex
+    f_local = element.k_local @ u_local
+
+    E = element.material['E']
+    A = element.section['area']
+    Iz = element.section['Iz']
+    Iy = element.section['Iy']
+    J = element.section['J']
+    h = element.section.get('height') or 0.1
+    b = element.section.get('width') or 0.1
+    y_max = h / 2.0
+    z_max = b / 2.0
+    kappa = 5.0 / 6.0
+    radius = max(y_max, z_max)
+
+    stresses = []
+    for i in [0, 6]:
+        sgn = 1 if i == 0 else -1
+        Fx = -f_local[i] * sgn
+        Fy = f_local[i + 1] * sgn
+        Fz = f_local[i + 2] * sgn
+        Mx = -f_local[i + 3] * sgn
+        My = f_local[i + 4] * sgn
+        Mz = f_local[i + 5] * sgn
+
+        sigma_axial = Fx / A
+        # Máxima amplitud normal en las cuatro fibras extremas del marco local.
+        sigma_candidates = [
+            sigma_axial + sy * My * z_max / Iy + sz * Mz * y_max / Iz
+            for sy in (-1.0, 1.0)
+            for sz in (-1.0, 1.0)
+        ]
+        sigma_amp = max(float(np.abs(candidate)) for candidate in sigma_candidates)
+
+        tau_torsion_amp = float(np.abs(Mx) * radius / J)
+        tau_shear_amp = kappa * float(np.hypot(np.abs(Fy) / A, np.abs(Fz) / A))
+        tau_amp = tau_torsion_amp + tau_shear_amp
+        sigma_vm_amp = float(np.sqrt(sigma_amp**2 + 3.0 * tau_amp**2))
+        stresses.append(sigma_vm_amp)
+
+    return stresses
 
 def _build_structure(structure_data: dict, mass_type: str = 'lumped') -> tuple[Structure, dict, dict, dict, list]:
     """Crea un objeto Structure fusionando nodos duplicados y filtrando aislados."""
@@ -373,6 +425,362 @@ def run_modal_analysis(structure_data: dict, num_modes: int) -> dict:
 
         return {"error": f"Error fatal en el nucleo de analisis modal: {str(e)}"}
 
+
+def get_element_matrices(structure_data: dict, element_id: int) -> dict:
+    """Devuelve matrices y contexto didáctico de un único elemento.
+
+    Se calcula bajo demanda para evitar incluir cientos de matrices 12x12 en la
+    respuesta modal inicial. Los metadatos `visual_*` no intervienen en K o M.
+    """
+    try:
+        mass_type = structure_data.get('settings', {}).get('mass_type', 'lumped')
+        structure, _, _, _, warnings = _build_structure(structure_data, mass_type=mass_type)
+        element = next(
+            (candidate for candidate in structure.elements if candidate.element_id == element_id),
+            None,
+        )
+        if element is None:
+            return {"error": f"El elemento {element_id} no existe o fue descartado por longitud cero."}
+
+        input_element = next(
+            (candidate for candidate in structure_data.get('elements', []) if candidate.get('id') == element_id),
+            {},
+        )
+        dof_labels = [
+            'ux₁', 'uy₁', 'uz₁', 'rx₁', 'ry₁', 'rz₁',
+            'ux₂', 'uy₂', 'uz₂', 'rx₂', 'ry₂', 'rz₂',
+        ]
+        section = element.section
+        material = element.material
+        total_mass = material['rho'] * section['area'] * element.L
+
+        result = {
+            "element_id": element.element_id,
+            "node_ids": list(input_element.get('node_ids') or [element.nodes[0].id, element.nodes[1].id]),
+            "length_m": element.L,
+            "mass_type": mass_type,
+            "dof_labels": dof_labels,
+            "properties": {
+                "material_name": material.get('name') or f"Material {input_element.get('material_id', '')}",
+                "section_name": section.get('name') or f"Seccion {input_element.get('section_id', '')}",
+                "E_pa": material['E'],
+                "G_pa": material['G'],
+                "rho_kg_m3": material['rho'],
+                "area_m2": section['area'],
+                "Iy_m4": section['Iy'],
+                "Iz_m4": section['Iz'],
+                "J_m4": section['J'],
+                "element_mass_kg": total_mass,
+            },
+            "local_axes": element.T[:3, :3],
+            "matrices": {
+                "stiffness": {
+                    "local": element.k_local,
+                    "global": element.k_global,
+                },
+                "mass": {
+                    "local": element.m_local,
+                    "global": element.m_global,
+                },
+            },
+            "checks": {
+                "stiffness_symmetry_error": float(np.max(np.abs(element.k_local - element.k_local.T))),
+                "mass_symmetry_error": float(np.max(np.abs(element.m_local - element.m_local.T))),
+            },
+            "warnings": warnings,
+        }
+        return _sanitize_for_json(result)
+    except Exception as exc:
+        return {"error": f"No se pudieron obtener las matrices del elemento: {str(exc)}"}
+
+
+GLOBAL_DOF_NAMES = ('ux', 'uy', 'uz', 'rx', 'ry', 'rz')
+
+
+def build_global_matrix_bundle(structure_data: dict) -> dict:
+    """Ensambla K/M una sola vez y conserva sus vistas completa y modal libre.
+
+    El bundle mantiene matrices CSR dentro de la caché del proceso; nunca se
+    serializa directamente. Esto permite consultar ventanas numéricas sin
+    transferir una matriz densa de hasta millones de entradas al navegador.
+    """
+    mass_type = structure_data.get('settings', {}).get('mass_type', 'lumped')
+    structure, _, _, _, warnings = _build_structure(structure_data, mass_type=mass_type)
+    K_global, M_global = assemble_global_matrices(
+        structure,
+        include_mass=True,
+        apply_constraints=False,
+    )
+    K_global = K_global.tocsr()
+    M_global = M_global.tocsr()
+
+    constrained_dofs = np.asarray(structure.get_constrained_dofs(), dtype=int)
+    all_dofs = np.arange(structure.num_dofs, dtype=int)
+    free_dofs = np.setdiff1d(all_dofs, constrained_dofs)
+    K_free = K_global[free_dofs, :][:, free_dofs].tocsr()
+    M_free = M_global[free_dofs, :][:, free_dofs].tocsr()
+
+    # modal_analysis aplica exactamente esta regularización si algún GDL libre
+    # tiene masa prácticamente nula. La vista Mff debe coincidir con la ecuación
+    # que realmente resuelve el eigensolver.
+    mass_regularized = bool(M_free.shape[0] and np.any(M_free.diagonal() < 1e-15))
+    regularization_value = 1e-9 if mass_regularized else 0.0
+    if mass_regularized:
+        M_free = (M_free + sparse.eye(M_free.shape[0], format='csr') * regularization_value).tocsr()
+
+    labels = [''] * structure.num_dofs
+    for node in structure.nodes:
+        for local_index, global_index in enumerate(node.dofs):
+            labels[global_index] = f"N{node.id}·{GLOBAL_DOF_NAMES[local_index]}"
+
+    return {
+        'structure': structure,
+        'matrices': {
+            ('stiffness', 'full'): K_global,
+            ('mass', 'full'): M_global,
+            ('stiffness', 'free'): K_free,
+            ('mass', 'free'): M_free,
+        },
+        'labels': labels,
+        'full_dof_indices': all_dofs,
+        'free_dof_indices': free_dofs,
+        'constrained_dof_indices': constrained_dofs,
+        'metadata': {
+            'node_count': len(structure.nodes),
+            'element_count': len(structure.elements),
+            'total_dofs': structure.num_dofs,
+            'free_dofs': int(free_dofs.size),
+            'constrained_dofs': int(constrained_dofs.size),
+            'mass_type': mass_type,
+            'mass_regularized': mass_regularized,
+            'regularization_value': regularization_value,
+            'warnings': warnings,
+        },
+    }
+
+
+def _sparse_matrix_stats(matrix: sparse.csr_matrix) -> dict:
+    absolute_data = np.abs(matrix.data)
+    difference = matrix - matrix.T
+    symmetry_error = float(np.max(np.abs(difference.data))) if difference.nnz else 0.0
+    diagonal = matrix.diagonal()
+    return {
+        'dimension': int(matrix.shape[0]),
+        'nnz': int(matrix.nnz),
+        'density': float(matrix.nnz / max(matrix.shape[0] * matrix.shape[1], 1)),
+        'max_abs': float(np.max(absolute_data)) if absolute_data.size else 0.0,
+        'min_nonzero_abs': float(np.min(absolute_data[absolute_data > 0])) if np.any(absolute_data > 0) else 0.0,
+        'diagonal_min': float(np.min(diagonal)) if diagonal.size else 0.0,
+        'diagonal_max': float(np.max(diagonal)) if diagonal.size else 0.0,
+        'symmetry_error': symmetry_error,
+    }
+
+
+def _build_sparse_heatmap(matrix: sparse.csr_matrix, requested_bins: int) -> dict:
+    dimension = matrix.shape[0]
+    bins = max(1, min(int(requested_bins), 120, max(dimension, 1)))
+    magnitudes = np.zeros((bins, bins), dtype=float)
+    counts = np.zeros((bins, bins), dtype=np.int64)
+
+    if matrix.nnz:
+        coo = matrix.tocoo()
+        row_bins = np.minimum((coo.row * bins) // max(dimension, 1), bins - 1)
+        col_bins = np.minimum((coo.col * bins) // max(dimension, 1), bins - 1)
+        np.maximum.at(magnitudes, (row_bins, col_bins), np.abs(coo.data))
+        np.add.at(counts, (row_bins, col_bins), 1)
+
+    return {
+        'bins': bins,
+        'values': magnitudes,
+        'counts': counts,
+    }
+
+
+def get_global_matrix_view(
+    bundle: dict,
+    matrix_kind: str = 'stiffness',
+    matrix_scope: str = 'full',
+    row_start: int = 0,
+    col_start: int = 0,
+    window_size: int = 12,
+    heatmap_bins: int = 64,
+) -> dict:
+    """Serializa el mapa completo y una ventana legible de K/M ensamblada."""
+    if matrix_kind not in {'stiffness', 'mass'}:
+        return {'error': "matrix_kind debe ser 'stiffness' o 'mass'."}
+    if matrix_scope not in {'full', 'free'}:
+        return {'error': "matrix_scope debe ser 'full' o 'free'."}
+
+    matrix = bundle['matrices'][(matrix_kind, matrix_scope)]
+    dimension = matrix.shape[0]
+    size = max(6, min(int(window_size), 36, max(dimension, 6)))
+    size = min(size, dimension) if dimension else 0
+    max_start = max(dimension - size, 0)
+    row_start = max(0, min(int(row_start), max_start))
+    col_start = max(0, min(int(col_start), max_start))
+    row_end = row_start + size
+    col_end = col_start + size
+
+    dof_indices = (
+        bundle['full_dof_indices']
+        if matrix_scope == 'full'
+        else bundle['free_dof_indices']
+    )
+    labels = bundle['labels']
+    row_global_indices = dof_indices[row_start:row_end]
+    col_global_indices = dof_indices[col_start:col_end]
+
+    result = {
+        'matrix': {
+            'kind': matrix_kind,
+            'scope': matrix_scope,
+            **_sparse_matrix_stats(matrix),
+        },
+        'metadata': bundle['metadata'],
+        'heatmap': _build_sparse_heatmap(matrix, heatmap_bins),
+        'window': {
+            'row_start': row_start,
+            'col_start': col_start,
+            'size': size,
+            'values': matrix[row_start:row_end, col_start:col_end].toarray(),
+            'row_labels': [labels[int(index)] for index in row_global_indices],
+            'col_labels': [labels[int(index)] for index in col_global_indices],
+            'row_global_indices': row_global_indices,
+            'col_global_indices': col_global_indices,
+        },
+    }
+    return _sanitize_for_json(result)
+
+
+def _complex_sparse_matrix_stats(matrix: sparse.csr_matrix) -> dict:
+    """Como _sparse_matrix_stats, pero magnitud |z| en vez de comparación real/compleja.
+
+    Z(ω) = K - ω²M + iωC es compleja SIMÉTRICA (Z^T = Z), no hermítica, porque K/M/C
+    son reales simétricas por reciprocidad FEM. Por eso el chequeo usa transpuesta
+    simple, no transpuesta conjugada.
+    """
+    absolute_data = np.abs(matrix.data)
+    difference = matrix - matrix.T
+    symmetry_error = float(np.max(np.abs(difference.data))) if difference.nnz else 0.0
+    diagonal_abs = np.abs(matrix.diagonal())
+    return {
+        'dimension': int(matrix.shape[0]),
+        'nnz': int(matrix.nnz),
+        'density': float(matrix.nnz / max(matrix.shape[0] * matrix.shape[1], 1)),
+        'max_abs': float(np.max(absolute_data)) if absolute_data.size else 0.0,
+        'min_nonzero_abs': float(np.min(absolute_data[absolute_data > 0])) if np.any(absolute_data > 0) else 0.0,
+        'diagonal_min_abs': float(np.min(diagonal_abs)) if diagonal_abs.size else 0.0,
+        'diagonal_max_abs': float(np.max(diagonal_abs)) if diagonal_abs.size else 0.0,
+        'symmetry_error': symmetry_error,
+    }
+
+
+def build_impedance_matrix_bundle(km_bundle: dict, damping_ratio: float = 0.05) -> dict:
+    """Deriva C (Rayleigh) del bundle K/M ya ensamblado, para construir Z(ω) = K - ω²M + iωC bajo demanda.
+
+    Reutiliza exactamente el mismo criterio de amortiguamiento que run_harmonic_analysis
+    (beta calibrado con la primera frecuencia natural, alpha=0), así la matriz que se
+    inspecciona aquí coincide con la que realmente resuelve el barrido armónico.
+    """
+    K_full = km_bundle['matrices'][('stiffness', 'full')]
+    M_full = km_bundle['matrices'][('mass', 'full')]
+    K_free = km_bundle['matrices'][('stiffness', 'free')]
+    M_free = km_bundle['matrices'][('mass', 'free')]
+    structure = km_bundle['structure']
+
+    freqs, _, _ = modal_analysis(K_full, M_full, structure, num_modes=1, debug=False)
+    if len(freqs) > 0 and freqs[0] > 0:
+        omega1 = 2 * np.pi * freqs[0]
+        beta = 2 * damping_ratio / omega1
+    else:
+        beta = 0.001
+    alpha = 0.0
+
+    C_full = rayleigh_damping_matrix(M_full, K_full, alpha, beta).tocsr()
+    C_free = rayleigh_damping_matrix(M_free, K_free, alpha, beta).tocsr()
+
+    return {
+        'km_bundle': km_bundle,
+        'C': {'full': C_full, 'free': C_free},
+        'damping_ratio': damping_ratio,
+        'rayleigh_alpha': alpha,
+        'rayleigh_beta': beta,
+        'first_natural_frequency_hz': float(freqs[0]) if len(freqs) > 0 else None,
+    }
+
+
+def get_impedance_matrix_view(
+    impedance_bundle: dict,
+    frequency_hz: float,
+    matrix_scope: str = 'free',
+    row_start: int = 0,
+    col_start: int = 0,
+    window_size: int = 12,
+    heatmap_bins: int = 64,
+) -> dict:
+    """Serializa el mapa completo y una ventana legible de Z(ω) = K - ω²M + iωC."""
+    if matrix_scope not in {'full', 'free'}:
+        return {'error': "matrix_scope debe ser 'full' o 'free'."}
+    if frequency_hz < 0:
+        return {'error': 'frequency_hz no puede ser negativa.'}
+
+    km_bundle = impedance_bundle['km_bundle']
+    K = km_bundle['matrices'][('stiffness', matrix_scope)]
+    M = km_bundle['matrices'][('mass', matrix_scope)]
+    C = impedance_bundle['C'][matrix_scope]
+
+    omega = 2 * np.pi * float(frequency_hz)
+    Z = ((K - (omega ** 2) * M) + 1j * omega * C).tocsr()
+
+    dimension = Z.shape[0]
+    size = max(6, min(int(window_size), 36, max(dimension, 6)))
+    size = min(size, dimension) if dimension else 0
+    max_start = max(dimension - size, 0)
+    row_start = max(0, min(int(row_start), max_start))
+    col_start = max(0, min(int(col_start), max_start))
+    row_end = row_start + size
+    col_end = col_start + size
+
+    dof_indices = (
+        km_bundle['full_dof_indices']
+        if matrix_scope == 'full'
+        else km_bundle['free_dof_indices']
+    )
+    labels = km_bundle['labels']
+    row_global_indices = dof_indices[row_start:row_end]
+    col_global_indices = dof_indices[col_start:col_end]
+    window_values = Z[row_start:row_end, col_start:col_end].toarray()
+
+    result = {
+        'matrix': {
+            'scope': matrix_scope,
+            'frequency_hz': float(frequency_hz),
+            'omega_rad_s': float(omega),
+            'damping_ratio': impedance_bundle['damping_ratio'],
+            **_complex_sparse_matrix_stats(Z),
+        },
+        'metadata': {
+            **km_bundle['metadata'],
+            'first_natural_frequency_hz': impedance_bundle['first_natural_frequency_hz'],
+            'rayleigh_alpha': impedance_bundle['rayleigh_alpha'],
+            'rayleigh_beta': impedance_bundle['rayleigh_beta'],
+        },
+        'heatmap': _build_sparse_heatmap(Z, heatmap_bins),
+        'window': {
+            'row_start': row_start,
+            'col_start': col_start,
+            'size': size,
+            'values_real': window_values.real,
+            'values_imag': window_values.imag,
+            'row_labels': [labels[int(index)] for index in row_global_indices],
+            'col_labels': [labels[int(index)] for index in col_global_indices],
+            'row_global_indices': row_global_indices,
+            'col_global_indices': col_global_indices,
+        },
+    }
+    return _sanitize_for_json(result)
+
+
 def run_harmonic_analysis(request_data: dict) -> dict:
     try:
         # Extraer parámetros del request
@@ -512,12 +920,43 @@ def run_harmonic_analysis(request_data: dict) -> dict:
         )
 
         amplitudes = np.abs(complex_responses)
+        omega = 2.0 * np.pi * freq_range
         free_index_lookup = np.full(structure.num_dofs, -1, dtype=int)
         free_index_lookup[free_dofs] = np.arange(free_dofs.size)
+
+        # Expandir la solución reducida a un vector global complejo por frecuencia.
+        # Los GDL restringidos permanecen en cero, lo cual permite recuperar esfuerzos
+        # elementales sin perder la correspondencia de índices globales.
+        full_complex_responses = np.zeros((len(freq_range), structure.num_dofs), dtype=np.complex128)
+        full_complex_responses[:, free_dofs] = complex_responses
+
+        node_stress_series: dict[int, np.ndarray] = {
+            int(original_node_id): np.zeros_like(freq_range, dtype=float)
+            for original_node_id in id_map.keys()
+        }
+        rep_to_originals: dict[int, list[int]] = {}
+        for original_node_id, rep_id in id_map.items():
+            rep_to_originals.setdefault(int(rep_id), []).append(int(original_node_id))
+
+        # Esfuerzo alternante por nodo = envolvente máxima de los extremos de elementos conectados.
+        for freq_idx in range(len(freq_range)):
+            u_full = full_complex_responses[freq_idx, :]
+            for element in structure.elements:
+                element_u = u_full[element.dof_indices]
+                end_stresses = _compute_element_harmonic_stress_amplitudes(element, element_u)
+                for node_idx, rep_node_id in enumerate([element.nodes[0].id, element.nodes[1].id]):
+                    for original_node_id in rep_to_originals.get(int(rep_node_id), []):
+                        node_stress_series[original_node_id][freq_idx] = max(
+                            node_stress_series[original_node_id][freq_idx],
+                            end_stresses[node_idx],
+                        )
         
         results = {
             "frequencies_sweep": _to_list(freq_range),
             "response_amplitudes": {},
+            "node_response_series": {},
+            "node_displacement_components": {},
+            "node_peak_summary": {},
             "peak_node_id": None,
             "peak_frequency": None,
             "peak_amplitude": None,
@@ -530,21 +969,50 @@ def run_harmonic_analysis(request_data: dict) -> dict:
         for original_node_id, rep_id in id_map.items():
             if rep_id in nodes_map_core:
                 node_core = nodes_map_core[rep_id]
-                # Magnitud de traslación (norma de ux, uy, uz)
                 node_dofs = node_core.dofs[:3]
                 node_free_indices = free_index_lookup[node_dofs]
                 valid_indices = node_free_indices[node_free_indices >= 0]
+                node_complex = full_complex_responses[:, node_dofs]
                 if valid_indices.size > 0:
-                    node_amps = np.sqrt(np.sum(amplitudes[:, valid_indices]**2, axis=1))
+                    disp_mag = np.sqrt(np.sum(np.abs(node_complex) ** 2, axis=1))
                 else:
-                    node_amps = np.zeros_like(freq_range, dtype=float)
-                results["response_amplitudes"][original_node_id] = _to_list(node_amps)
+                    disp_mag = np.zeros_like(freq_range, dtype=float)
+                vel_mag = omega * disp_mag
+                acc_mag = (omega**2) * disp_mag
+                stress_mag = node_stress_series.get(int(original_node_id), np.zeros_like(freq_range, dtype=float))
 
-                finite_mask = np.isfinite(node_amps)
+                results["response_amplitudes"][original_node_id] = _to_list(disp_mag)
+                results["node_response_series"][original_node_id] = {
+                    "displacement_m": _to_list(disp_mag),
+                    "velocity_m_s": _to_list(vel_mag),
+                    "acceleration_m_s2": _to_list(acc_mag),
+                    "stress_pa": _to_list(stress_mag),
+                }
+                results["node_displacement_components"][original_node_id] = {
+                    "ux_real_m": _to_list(np.real(node_complex[:, 0])),
+                    "ux_imag_m": _to_list(np.imag(node_complex[:, 0])),
+                    "uy_real_m": _to_list(np.real(node_complex[:, 1])),
+                    "uy_imag_m": _to_list(np.imag(node_complex[:, 1])),
+                    "uz_real_m": _to_list(np.real(node_complex[:, 2])),
+                    "uz_imag_m": _to_list(np.imag(node_complex[:, 2])),
+                }
+
+                finite_mask = np.isfinite(disp_mag)
                 if np.any(finite_mask):
                     finite_indices = np.where(finite_mask)[0]
-                    local_idx = finite_indices[int(np.argmax(node_amps[finite_mask]))]
-                    local_peak = float(node_amps[local_idx])
+                    local_idx = finite_indices[int(np.argmax(disp_mag[finite_mask]))]
+                    local_peak = float(disp_mag[local_idx])
+                    stress_finite = np.isfinite(stress_mag)
+                    stress_idx = int(np.argmax(np.where(stress_finite, stress_mag, -np.inf))) if np.any(stress_finite) else local_idx
+                    results["node_peak_summary"][original_node_id] = {
+                        "frequency_hz": float(freq_range[local_idx]),
+                        "displacement_m": float(disp_mag[local_idx]),
+                        "velocity_m_s": float(vel_mag[local_idx]),
+                        "acceleration_m_s2": float(acc_mag[local_idx]),
+                        "stress_pa": float(stress_mag[local_idx]),
+                        "stress_peak_pa": float(stress_mag[stress_idx]) if np.any(stress_finite) else 0.0,
+                        "stress_peak_frequency_hz": float(freq_range[stress_idx]) if np.any(stress_finite) else float(freq_range[local_idx]),
+                    }
                     if local_peak > peak_amplitude:
                         peak_amplitude = local_peak
                         peak_frequency = float(freq_range[local_idx])
