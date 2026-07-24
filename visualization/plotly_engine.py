@@ -580,6 +580,24 @@ def add_loads_to_figure(fig, structure_data, nodes):
         ))
 
 
+def _adaptive_camera_eye(span_x, span_y, span_z, base=1.35, min_eye=0.7, max_eye=1.9, softness=0.35):
+    """Ojo de camara ajustado a la relacion de aspecto real de la estructura.
+
+    Con aspectmode='data' el eje mas largo ya ocupa toda la escena; un ojo simetrico
+    fijo (1.8,1.8,1.4) lo mira casi de frente y lo aplasta en diagonal para
+    estructuras muy alargadas y chatas (puentes, vigas). Los ejes cortos necesitan
+    retroceder mas (verse desde afuera); el eje mas largo necesita acercarse, no
+    alejarse mas.
+    """
+    max_span = max(span_x, span_y, span_z, 1e-6)
+
+    def component(span):
+        ratio = span / max_span
+        return max(min_eye, min(max_eye, base / (ratio + softness)))
+
+    return dict(x=component(span_x), y=component(span_y), z=component(span_z))
+
+
 def apply_layout_config(fig, nodes, cfg):
     is_dark = cfg['is_dark']
     bg_color = cfg['bg_color']
@@ -598,14 +616,16 @@ def apply_layout_config(fig, nodes, cfg):
             span = max_v - min_v
             # En ejes planos se necesita espacio para ver el volumen de la sección,
             # no un rango de solo ±40 mm que recorte perfiles de 100–300 mm.
-            margin = span * 0.2 if span > 1e-6 else max(global_span * 0.12, 150.0)
+            margin = span * 0.08 if span > 1e-6 else max(global_span * 0.12, 150.0)
             return [min_v - margin, max_v + margin]
 
         rx = get_range(min_coords[0], max_coords[0])
         ry = get_range(min_coords[1], max_coords[1])
         rz = get_range(min_coords[2], max_coords[2])
+        camera_eye = _adaptive_camera_eye(rx[1] - rx[0], ry[1] - ry[0], rz[1] - rz[0])
     else:
         rx = ry = rz = [-100, 100]
+        camera_eye = dict(x=1.8, y=1.8, z=1.4)
 
     axis_config = dict(
         gridcolor=grid_color,
@@ -634,15 +654,15 @@ def apply_layout_config(fig, nodes, cfg):
             zaxis=dict(**axis_config, title=dict(text='Z (mm)'), range=rz, autorange=False),
             aspectmode='data',
             camera=dict(
-                eye=dict(x=1.8, y=1.8, z=1.4),
+                eye=camera_eye,
                 up=dict(x=0, y=0, z=1),
                 center=dict(x=0, y=0, z=0),
                 projection=dict(type='perspective')
             )
         ),
-        margin=dict(l=0, r=0, b=0, t=0),
+        margin=dict(l=0, r=0, b=32, t=0),
         legend=dict(
-            yanchor="top", y=0.98, xanchor="right", x=0.98,
+            orientation="h", x=0.5, xanchor="center", y=0, yanchor="top",
             bgcolor=bg_color, bordercolor=grid_color, borderwidth=1,
             font=dict(size=11, family=font_family, color=text_color)
         ),
@@ -675,7 +695,7 @@ def interpolate_beam(p1, p2, d1, d2, segments=4):
     v_orig = np.array(p2) - np.array(p1)
     L = np.linalg.norm(v_orig)
     if L < 1e-6:
-        return [], [], [], [], [], []
+        return [], [], [], [], [], [], []
     v_unit = v_orig / L
 
     disp1 = np.array(d1[:3]) * 1000
@@ -695,24 +715,26 @@ def interpolate_beam(p1, p2, d1, d2, segments=4):
 
     base_x, base_y, base_z = [], [], []
     delta_x, delta_y, delta_z = [], [], []
+    mag = []
     t_vals = np.linspace(0, 1, segments+1)
-    
+
     for t in t_vals:
         t2, t3 = t*t, t*t*t
         h00, h10 = 2*t3 - 3*t2 + 1, t3 - 2*t2 + t
         h01, h11 = -2*t3 + 3*t2, t3 - t2
-        
+
         P_base = h00 * P1_base + h10 * T1_base + h01 * P2_base + h11 * T2_base
         base_x.append(float(P_base[0]))
         base_y.append(float(P_base[1]))
         base_z.append(float(P_base[2]))
-        
+
         P_delta = h00 * disp1 + h10 * T1_unit + h01 * disp2 + h11 * T2_unit
         delta_x.append(float(P_delta[0]))
         delta_y.append(float(P_delta[1]))
         delta_z.append(float(P_delta[2]))
-        
-    return base_x, base_y, base_z, delta_x, delta_y, delta_z
+        mag.append(float(np.linalg.norm(P_delta)))
+
+    return base_x, base_y, base_z, delta_x, delta_y, delta_z, mag
 
 
 def get_deformed_traces(
@@ -731,9 +753,13 @@ def get_deformed_traces(
         if v is None: return None
         return float(v) if np.isfinite(v) else 0.0
 
+    section_data = []
+    all_mag = []
+
     for sid, els in sections_elements.items():
         bx, by, bz = [], [], []
         dx, dy, dz = [], [], []
+        mg = []
         element_ids = []
         for el in els:
             n1, n2 = node_map.get(el['node_ids'][0]), node_map.get(el['node_ids'][1])
@@ -745,7 +771,7 @@ def get_deformed_traces(
             d1, d2 = (list(d1) + [0]*6)[:6], (list(d2) + [0]*6)[:6]
 
             try:
-                px_b, py_b, pz_b, px_d, py_d, pz_d = interpolate_beam(
+                px_b, py_b, pz_b, px_d, py_d, pz_d, px_m = interpolate_beam(
                     n1['coords'],
                     n2['coords'],
                     d1,
@@ -754,26 +780,47 @@ def get_deformed_traces(
                 )
                 bx.extend(px_b + [None]); by.extend(py_b + [None]); bz.extend(pz_b + [None])
                 dx.extend(px_d + [None]); dy.extend(py_d + [None]); dz.extend(pz_d + [None])
+                # 0.0 en el corte de segmento: nunca se dibuja (x/y/z son None ahí), pero
+                # scatter3d.line.color de Plotly no acepta None como elemento válido.
+                mg.extend(px_m + [0.0])
                 element_ids.extend([el['id']] * len(px_b) + [None])
             except:
+                d1_mm = [float(d1[0]*1000), float(d1[1]*1000), float(d1[2]*1000)]
+                d2_mm = [float(d2[0]*1000), float(d2[1]*1000), float(d2[2]*1000)]
                 bx.extend([float(n1['coords'][0]), float(n2['coords'][0]), None])
                 by.extend([float(n1['coords'][1]), float(n2['coords'][1]), None])
                 bz.extend([float(n1['coords'][2]), float(n2['coords'][2]), None])
-                dx.extend([float(d1[0]*1000), float(d2[0]*1000), None])
-                dy.extend([float(d1[1]*1000), float(d2[1]*1000), None])
-                dz.extend([float(d1[2]*1000), float(d2[2]*1000), None])
+                dx.extend([d1_mm[0], d2_mm[0], None])
+                dy.extend([d1_mm[1], d2_mm[1], None])
+                dz.extend([d1_mm[2], d2_mm[2], None])
+                mg.extend([float(np.linalg.norm(d1_mm)), float(np.linalg.norm(d2_mm)), 0.0])
                 element_ids.extend([el['id'], el['id'], None])
 
         final_x = [clean(bx[i] + dx[i]*scale) if bx[i] is not None else None for i in range(len(bx))]
         final_y = [clean(by[i] + dy[i]*scale) if by[i] is not None else None for i in range(len(by))]
         final_z = [clean(bz[i] + dz[i]*scale) if bz[i] is not None else None for i in range(len(bz))]
 
+        all_mag.extend(v for i, v in enumerate(mg) if bx[i] is not None)
+        section_data.append((sid, final_x, final_y, final_z, bx, by, bz, dx, dy, dz, mg, element_ids))
+
+    cmin = min(all_mag) if all_mag else 0.0
+    cmax = max(all_mag) if all_mag else 1.0
+    if cmax <= cmin:
+        cmax = cmin + 1e-6
+
+    for idx, (sid, final_x, final_y, final_z, bx, by, bz, dx, dy, dz, mg, element_ids) in enumerate(section_data):
         trace_kwargs = dict(
             x=final_x, y=final_y, z=final_z,
             mode='lines',
-            line=dict(color=color, width=4),
+            line=dict(color=mg, colorscale='Jet', cmin=cmin, cmax=cmax, width=5),
             name=f"Deformada {sid}",
         )
+        if idx == 0:
+            trace_kwargs["line"]["showscale"] = True
+            trace_kwargs["line"]["colorbar"] = dict(
+                title=dict(text="Deformación (mm)", side="right", font=dict(size=10)),
+                thickness=14, len=0.6, x=1.0, outlinewidth=0,
+            )
 
         if include_customdata:
             cdata = []
@@ -817,8 +864,10 @@ def generate_results_figure(
     for trace in fig.data:
         if isinstance(trace, go.Mesh3d):
             # En resultados, el sólido original funciona como referencia y no debe
-            # ocultar la línea deformada/modal superpuesta.
-            trace.update(opacity=ghost_opacity, hoverinfo='skip', showlegend=False)
+            # ocultar la línea deformada/modal superpuesta. Se conserva su entrada de
+            # leyenda (heredada de generate_structure_figure) para poder ocultarlo con
+            # un click, igual que cualquier otra traza.
+            trace.update(opacity=ghost_opacity, hoverinfo='skip')
         elif isinstance(trace, go.Scatter3d):
             mode = getattr(trace, 'mode', '') or ''
             if mode == 'lines':
@@ -913,7 +962,7 @@ def generate_results_figure(
 
     def get_ext_range(min_v, max_v):
         span = max_v - min_v
-        margin = max(span, 100.0) * 0.4
+        margin = max(span, 100.0) * 0.08
         return [min_v - margin, max_v + margin]
 
     axis_style = dict(
@@ -922,14 +971,16 @@ def generate_results_figure(
         nticks=6, tickformat='.0f', showgrid=True, zerolinewidth=2, gridwidth=1.0, showbackground=True, backgroundcolor='rgba(0,0,0,0)', showspikes=False
     )
 
+    camera_eye = _adaptive_camera_eye(*(max_coords - min_coords))
+
     fig.update_layout(
         scene=dict(
             xaxis=dict(range=get_ext_range(min_coords[0], max_coords[0]), autorange=False, **axis_style, title_text='X (mm)'),
             yaxis=dict(range=get_ext_range(min_coords[1], max_coords[1]), autorange=False, **axis_style, title_text='Y (mm)'),
             zaxis=dict(range=get_ext_range(min_coords[2], max_coords[2]), autorange=False, **axis_style, title_text='Z (mm)'),
-            aspectmode='data', camera=dict(eye=dict(x=1.8, y=1.8, z=1.4), projection=dict(type='perspective'))
+            aspectmode='data', camera=dict(eye=camera_eye, projection=dict(type='perspective'))
         ),
-        title_text=f"Análisis {scale}x{(' (Animación)' if animate else '')}"
+        margin=dict(l=0, r=0, b=32, t=0),
     )
 
     return fig

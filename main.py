@@ -48,6 +48,7 @@ _modal_cache = LRUCache(CACHE_MAX_SIZE)
 _modal_viz_cache = LRUCache(50)
 _harmonic_cache = LRUCache(CACHE_MAX_SIZE)
 _element_matrix_cache = LRUCache(CACHE_MAX_SIZE)
+_element_bd_cache = LRUCache(CACHE_MAX_SIZE)
 _global_matrix_bundle_cache = LRUCache(20)
 _impedance_matrix_bundle_cache = LRUCache(20)
 
@@ -72,6 +73,7 @@ from analysis_core.api_adapters import (
     build_global_matrix_bundle,
     build_impedance_matrix_bundle,
     get_element_matrices,
+    get_element_bd_matrices,
     get_global_matrix_view,
     get_impedance_matrix_view,
     run_static_analysis,
@@ -299,6 +301,24 @@ async def element_matrices(request: ElementMatricesRequest):
     return result
 
 
+@app.post("/api/analysis/element-bd-matrices", summary="Matrices [B] y [D] explicitas de un elemento, con verificacion contra k_local")
+async def element_bd_matrices(request: ElementMatricesRequest):
+    structure_data = request.structure.model_dump()
+    cache_key = compute_structure_hash(
+        structure_data,
+        {"analysis": "element-bd-matrices", "element_id": request.element_id},
+    )
+    cached = _element_bd_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    result = get_element_bd_matrices(structure_data, request.element_id)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    _element_bd_cache.set(cache_key, result)
+    return result
+
+
 @app.post("/api/analysis/global-matrices", summary="Explora matrices globales ensambladas")
 async def global_matrices(request: GlobalMatrixViewRequest):
     """Devuelve un mapa completo y una ventana numérica de K/M o Kff/Mff."""
@@ -519,6 +539,90 @@ async def get_modal_results_viz(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+_harmonic_viz_cache = LRUCache(50)
+
+
+@app.post("/api/visualization/harmonic-results", summary="Visualizacion de respuesta armonica con el mismo motor grafico que estatico/modal")
+async def get_harmonic_results_viz(
+    request: HarmonicAnalysisRequest,
+    frequency_hz: float = 1.0,
+    scale: float = 1.0,
+    theme: str = "dark",
+):
+    """Reusa generate_results_figure (el mismo codigo de estatico/modal) tomando
+    la parte REAL del desplazamiento complejo a la frecuencia pedida (fase 0).
+    Se pierde el aporte de la parte imaginaria (desfase entre grados de libertad
+    que no oscilan en fase) a cambio de la paleta/curvatura identica a Estatico.
+    """
+    try:
+        request_data = request.model_dump()
+        analysis_cache_key = compute_structure_hash(
+            request.structure.model_dump(),
+            {
+                "analysis": "harmonic",
+                "freq_start": request.freq_start,
+                "freq_end": request.freq_end,
+                "num_points": request.num_points,
+                "damping_ratio": request.damping_ratio,
+                "is_unbalanced": request.is_unbalanced,
+                "unbalanced_me": request.unbalanced_me,
+                "unbalanced_node_id": request.unbalanced_node_id,
+                "unbalanced_direction": request.unbalanced_direction,
+                "unbalanced_mass": request.unbalanced_mass,
+                "unbalanced_eccentricity": request.unbalanced_eccentricity,
+            },
+        )
+
+        cached = _harmonic_cache.get(analysis_cache_key)
+        if cached is not None:
+            print(f"[CACHE HIT] Harmonic analysis (viz) - key: {analysis_cache_key[:16]}...")
+            result_dict = cached
+        else:
+            result_dict = run_harmonic_analysis(request_data)
+            if "error" in result_dict:
+                raise HTTPException(status_code=400, detail=result_dict["error"])
+            _harmonic_cache.set(analysis_cache_key, result_dict)
+            print(f"[CACHE SET] Harmonic analysis (viz) - key: {analysis_cache_key[:16]}...")
+
+        frequencies = result_dict.get("frequencies_sweep") or []
+        if not frequencies:
+            raise HTTPException(status_code=400, detail="Sin barrido de frecuencias calculado")
+
+        freq_idx = min(range(len(frequencies)), key=lambda i: abs(frequencies[i] - frequency_hz))
+
+        viz_cache_key = compute_structure_hash(
+            request.structure.model_dump(),
+            {**{"analysis": "harmonic-viz", "freq_idx": freq_idx, "scale": round(float(scale), 8), "theme": theme}},
+        )
+        cached_json = _harmonic_viz_cache.get(viz_cache_key)
+        if cached_json is not None:
+            print(f"[CACHE HIT] Harmonic viz json - key: {viz_cache_key[:16]}...")
+            return Response(content=cached_json, media_type="application/json")
+
+        components = result_dict.get("node_displacement_components", {})
+        displacements = {
+            int(node_id): [
+                comp["ux_real_m"][freq_idx], comp["uy_real_m"][freq_idx], comp["uz_real_m"][freq_idx],
+                comp["rx_real_rad"][freq_idx], comp["ry_real_rad"][freq_idx], comp["rz_real_rad"][freq_idx],
+            ]
+            for node_id, comp in components.items()
+        }
+
+        structure_data = request.structure.model_dump()
+        fig = generate_results_figure(structure_data, displacements, scale, theme=theme)
+        fig_json = fig.to_json()
+        _harmonic_viz_cache.set(viz_cache_key, fig_json)
+        print(f"[CACHE SET] Harmonic viz json - key: {viz_cache_key[:16]}...")
+        return Response(content=fig_json, media_type="application/json")
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/api/projects")
 async def list_projects(user=Depends(get_current_user)):

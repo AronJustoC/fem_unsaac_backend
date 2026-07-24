@@ -135,7 +135,13 @@ class Element:
         self.k_global = self.T.T @ self.k_local @ self.T
 
     def get_stresses(self, u_global):
-        """Calcula los esfuerzos de Von Mises en los dos extremos del elemento.
+        """Calcula los esfuerzos en los dos extremos del elemento.
+
+        Devuelve, por extremo: esfuerzo normal (axial+flexion superpuestos),
+        esfuerzo cortante (torsion+corte directo superpuestos), los dos esfuerzos
+        principales y el cortante maximo (circulo de Mohr para el estado plano
+        sigma_x=normal, tau_xy=shear, sigma_y=0 — el estado de esfuerzo que da la
+        teoria de vigas), y Von Mises como resumen final.
         u_global: Vector de desplazamientos globales (solo los 12 DOFs del elemento).
         """
         u_local = self.T @ u_global
@@ -192,8 +198,23 @@ class Element:
             
             # Von Mises: sqrt(sigma^2 + 3*tau^2)
             sigma_vm = np.sqrt(sigma_total**2 + 3 * tau_total**2)
-            stresses.append(float(sigma_vm))
-            
+
+            # Circulo de Mohr (estado plano sigma_x=sigma_total, tau_xy=tau_total,
+            # sigma_y=0): centro sigma_total/2, radio = cortante maximo.
+            center = sigma_total / 2.0
+            radius = np.sqrt(center**2 + tau_total**2)
+            sigma_1 = center + radius
+            sigma_2 = center - radius
+
+            stresses.append({
+                "sigma_normal": float(sigma_total),
+                "tau_shear": float(tau_total),
+                "sigma_1": float(sigma_1),
+                "sigma_2": float(sigma_2),
+                "tau_max": float(radius),
+                "sigma_vm": float(sigma_vm),
+            })
+
         return stresses
 
     def _compute_local_mass(self, consistent=None):

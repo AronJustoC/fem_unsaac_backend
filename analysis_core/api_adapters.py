@@ -4,7 +4,7 @@ from scipy import sparse
 from .analisis_modal_3d.structures.structure import Structure
 from .analisis_modal_3d.structures.node import Node as CoreNode
 from .analisis_modal_3d.structures.element import Element as CoreElement
-from .analisis_modal_3d.analysis.assembler import assemble_global_matrices
+from .analisis_modal_3d.analysis.assembler import assemble_global_matrices, apply_constraint_penalties
 from .analisis_modal_3d.analysis.static import static_analysis
 from .analisis_modal_3d.analysis.modal import modal_analysis
 from .analisis_modal_3d.analysis.frequency_response import direct_frequency_response
@@ -37,8 +37,24 @@ def _to_list(data):
     return data
 
 
-def _compute_element_harmonic_stress_amplitudes(element, u_global_complex: np.ndarray) -> list[float]:
-    """Devuelve amplitudes alternantes de Von Mises en los dos extremos del elemento.
+def _is_massless_link(element) -> bool:
+    """Detecta elementos de enlace rigido sin masa (p.ej. MOTOR_LINK: rho=0, E muy
+    alto para inyectar una excitacion sin agregar flexibilidad/masa propia).
+
+    Su fuerza interna es real (la usa el solver), pero su "esfuerzo" reportado es
+    un artefacto de modelado sin significado fisico (seccion/rigidez ficticias) y
+    puede ser ordenes de magnitud mayor que el resto de la estructura, arruinando
+    la escala de color de todo el grafico. Se excluye de esfuerzos reportados; la
+    carga que transporta ya queda reflejada en los elementos reales conectados al
+    mismo nodo via el propio metodo de rigidez, sin necesidad de "transferirla" a mano.
+    """
+    return float(element.material.get('rho', 0.0) or 0.0) <= 0.0
+
+
+def _compute_element_harmonic_stress_amplitudes(element, u_global_complex: np.ndarray) -> list[dict]:
+    """Devuelve amplitudes alternantes por extremo del elemento: normal, cortante,
+    los dos principales + cortante maximo (Mohr, mismo criterio que get_stresses)
+    y Von Mises como resumen.
 
     La respuesta armónica U(ω) es compleja. Para reporte nodal usamos una envolvente
     conservadora compatible con get_stresses(): se recuperan fuerzas internas locales
@@ -92,7 +108,22 @@ def _compute_element_harmonic_stress_amplitudes(element, u_global_complex: np.nd
         tau_shear_amp = kappa * float(np.hypot(np.abs(Fy) / A, np.abs(Fz) / A))
         tau_amp = tau_torsion_amp + tau_shear_amp
         sigma_vm_amp = float(np.sqrt(sigma_amp**2 + 3.0 * tau_amp**2))
-        stresses.append(sigma_vm_amp)
+
+        # Mismo circulo de Mohr que get_stresses(), aplicado a la envolvente
+        # (sigma_amp, tau_amp) en vez del valor instantaneo — no es exacto para un
+        # complejo (Von Mises no es lineal), pero es la misma aproximación
+        # conservadora que ya se usa para sigma_vm_amp.
+        center = sigma_amp / 2.0
+        mohr_radius = float(np.sqrt(center**2 + tau_amp**2))
+
+        stresses.append({
+            "sigma_normal": sigma_amp,
+            "tau_shear": tau_amp,
+            "sigma_1": center + mohr_radius,
+            "sigma_2": center - mohr_radius,
+            "tau_max": mohr_radius,
+            "sigma_vm": sigma_vm_amp,
+        })
 
     return stresses
 
@@ -294,15 +325,13 @@ def run_static_analysis(structure_data: dict) -> dict:
 
         print("DEBUG: Comenzando ensamblado de matrices...")
         K_pure, _ = assemble_global_matrices(structure, include_mass=False, apply_constraints=False)
-        print("DEBUG: Matriz K_pure ensamblada")
-        
-        K_penalized, _ = assemble_global_matrices(structure, include_mass=False, apply_constraints=True)
-        print("DEBUG: Matriz K_penalized ensamblada")
-        
+        # Penalización reutiliza K_pure en vez de reensamblar todos los elementos de nuevo.
+        K_penalized = apply_constraint_penalties(K_pure, structure)
+        print(f"DEBUG: Matrices ensambladas - K_global shape: {K_pure.shape}")
+
         F_global = np.zeros(structure.num_dofs, dtype=np.float64)
         dof_map = {"fx": 0, "fy": 1, "fz": 2, "mx": 3, "my": 4, "mz": 5}
 
-        print(f"DEBUG: Procesando {len(loads)} cargas...")
         for load_data in loads:
             original_node_id = load_data.get('node_id')
             if original_node_id is None:
@@ -314,7 +343,6 @@ def run_static_analysis(structure_data: dict) -> dict:
                 continue
 
             node_core = nodes_map_core[rep_id]
-            print(f"DEBUG: Nodo rep {rep_id} (orig {original_node_id}) coords: {node_core.coords}")
 
             # Iterar sobre los tipos de fuerza y aplicarlos si existen en la carga
             for force_type, dof_local_index in dof_map.items():
@@ -322,15 +350,6 @@ def run_static_analysis(structure_data: dict) -> dict:
                 if force_value != 0.0:
                     global_dof_index = node_core.dofs[dof_local_index]
                     F_global[global_dof_index] += force_value
-                    print(f"DEBUG: Aplicada carga {force_type}={force_value} en nodo original {original_node_id} (rep: {rep_id}, DOF global: {global_dof_index})")
-
-        # Log del vector de fuerzas solo para componentes distintas de cero
-        nonzero_f = np.where(F_global != 0)[0]
-        for idx in nonzero_f:
-            print(f"DEBUG: F_global[{idx}] = {F_global[idx]}")
-
-        print(f"DEBUG: K_global shape: {K_pure.shape}")
-        print(f"DEBUG: K_penalized shape: {K_penalized.shape}")
 
         # --- Análisis Estático ---
         displacements = static_analysis(K_penalized, F_global)
@@ -385,8 +404,22 @@ def run_static_analysis(structure_data: dict) -> dict:
             internal_forces = element.get_internal_forces(displacements)
             results["element_forces"][element.element_id] = internal_forces
             
-            # Esfuerzos de Von Mises
-            results["stresses"][element.element_id] = element.get_stresses(u_el)
+            # Esfuerzos por extremo. Los enlaces rigidos sin masa (MOTOR_LINK) no
+            # reportan esfuerzo propio: es un artefacto de modelado, no un valor real.
+            # Lista aplanada (el schema es list[float]): orden fijo por extremo i,j:
+            # [vm_i, vm_j, normal_i, normal_j, shear_i, shear_j, s1_i, s1_j, s2_i, s2_j, taumax_i, taumax_j]
+            if _is_massless_link(element):
+                results["stresses"][element.element_id] = [0.0] * 12
+            else:
+                end_i, end_j = element.get_stresses(u_el)
+                results["stresses"][element.element_id] = [
+                    end_i["sigma_vm"], end_j["sigma_vm"],
+                    end_i["sigma_normal"], end_j["sigma_normal"],
+                    end_i["tau_shear"], end_j["tau_shear"],
+                    end_i["sigma_1"], end_j["sigma_1"],
+                    end_i["sigma_2"], end_j["sigma_2"],
+                    end_i["tau_max"], end_j["tau_max"],
+                ]
 
         results["stresses"] = results["stresses"] # Ensure it's explicitly included if needed, but it's already in the dict
 
@@ -510,6 +543,108 @@ def get_element_matrices(structure_data: dict, element_id: int) -> dict:
         return _sanitize_for_json(result)
     except Exception as exc:
         return {"error": f"No se pudieron obtener las matrices del elemento: {str(exc)}"}
+
+
+_GAUSS_X, _GAUSS_W = np.polynomial.legendre.leggauss(5)
+
+
+def _bd_rows_for_element(element) -> dict:
+    """Deformacion-desplazamiento [B] y constitutiva [D] explicitas para el
+    elemento de viga, evaluadas contra k_local para probar que son la misma
+    formulacion (k_local = integral de B^T D B, solo que ya resuelta a mano
+    para viga en vez de integrada numericamente como en un elemento continuo).
+    """
+    L = element.L
+    E = element.material['E']
+    G = element.material['G']
+    A = element.section['area']
+    Iy = element.section['Iy']
+    Iz = element.section['Iz']
+    J = element.section['J']
+
+    def b_axial():
+        return np.array([-1 / L, 0, 0, 0, 0, 0, 1 / L, 0, 0, 0, 0, 0])
+
+    def b_torsion():
+        return np.array([0, 0, 0, -1 / L, 0, 0, 0, 0, 0, 1 / L, 0, 0])
+
+    def hermite_curv(x):
+        return (
+            -6 / L ** 2 + 12 * x / L ** 3,
+            -4 / L + 6 * x / L ** 2,
+            6 / L ** 2 - 12 * x / L ** 3,
+            -2 / L + 6 * x / L ** 2,
+        )
+
+    def b_bend_z(x):
+        h1, h2, h3, h4 = hermite_curv(x)
+        row = np.zeros(12)
+        row[1], row[5], row[7], row[11] = h1, h2, h3, h4
+        return row
+
+    def b_bend_y(x):
+        h1, h2, h3, h4 = hermite_curv(x)
+        row = np.zeros(12)
+        row[2], row[4], row[8], row[10] = h1, -h2, h3, -h4
+        return row
+
+    xs = 0.5 * L * (_GAUSS_X + 1)
+    ws = 0.5 * L * _GAUSS_W
+
+    k_check = (
+        E * A * np.outer(b_axial(), b_axial()) * L
+        + G * J * np.outer(b_torsion(), b_torsion()) * L
+        + sum(E * Iz * np.outer(b_bend_z(x), b_bend_z(x)) * w for x, w in zip(xs, ws))
+        + sum(E * Iy * np.outer(b_bend_y(x), b_bend_y(x)) * w for x, w in zip(xs, ws))
+    )
+
+    return {
+        "D": {"E_axial_bending": E, "G_shear_torsion": G},
+        "B": {
+            "axial": b_axial().tolist(),
+            "torsion": b_torsion().tolist(),
+            "bend_z_end_i": b_bend_z(0.0).tolist(),
+            "bend_z_end_j": b_bend_z(L).tolist(),
+            "bend_y_end_i": b_bend_y(0.0).tolist(),
+            "bend_y_end_j": b_bend_y(L).tolist(),
+        },
+        "verification": {
+            "k_check": k_check.tolist(),
+            "k_local": element.k_local.tolist(),
+            "max_abs_diff": float(np.max(np.abs(k_check - element.k_local))),
+        },
+    }
+
+
+def get_element_bd_matrices(structure_data: dict, element_id: int) -> dict:
+    """[B] y [D] explicitas para un elemento, mas la verificacion de que
+    integradas reproducen k_local (misma logica de rigidez, sin instanciarlas
+    como arrays por separado en el resto del codigo).
+    """
+    try:
+        mass_type = structure_data.get('settings', {}).get('mass_type', 'lumped')
+        structure, _, _, _, _ = _build_structure(structure_data, mass_type=mass_type)
+        element = next(
+            (candidate for candidate in structure.elements if candidate.element_id == element_id),
+            None,
+        )
+        if element is None:
+            return {"error": f"El elemento {element_id} no existe o fue descartado por longitud cero."}
+
+        dof_labels = [
+            'ux₁', 'uy₁', 'uz₁', 'rx₁', 'ry₁', 'rz₁',
+            'ux₂', 'uy₂', 'uz₂', 'rx₂', 'ry₂', 'rz₂',
+        ]
+        result = {
+            "element_id": element.element_id,
+            "node_ids": [element.nodes[0].id, element.nodes[1].id],
+            "length_m": element.L,
+            "dof_labels": dof_labels,
+            **_bd_rows_for_element(element),
+        }
+        return _sanitize_for_json(result)
+    except Exception as exc:
+        return {"error": f"No se pudieron obtener las matrices B/D del elemento: {str(exc)}"}
 
 
 GLOBAL_DOF_NAMES = ('ux', 'uy', 'uz', 'rx', 'ry', 'rz')
@@ -948,33 +1083,94 @@ def run_harmonic_analysis(request_data: dict) -> dict:
         full_complex_responses = np.zeros((len(freq_range), structure.num_dofs), dtype=np.complex128)
         full_complex_responses[:, free_dofs] = complex_responses
 
-        node_stress_series: dict[int, np.ndarray] = {
-            int(original_node_id): np.zeros_like(freq_range, dtype=float)
-            for original_node_id in id_map.keys()
+        # Cada esfuerzo del circulo de Mohr (ver _compute_element_harmonic_stress_amplitudes)
+        # se reporta por separado, no solo Von Mises: normal, cortante, los dos
+        # principales y el cortante maximo. "Peor caso" entre elementos conectados
+        # = el mas grande para todos, EXCEPTO sigma_2 (principal de compresion, que
+        # en este modelo de amplitud siempre es <= 0): ahi el peor caso es el mas
+        # NEGATIVO. invert=True acumula -sigma_2 con el mismo max() y se des-invierte
+        # al leerlo, para no tener que inicializar el array en -inf.
+        STRESS_END_FIELDS = (
+            ("sigma_vm", "stress_pa", False),
+            ("sigma_normal", "stress_normal_pa", False),
+            ("tau_shear", "stress_shear_pa", False),
+            ("sigma_1", "stress_sigma1_pa", False),
+            ("sigma_2", "stress_sigma2_pa", True),
+            ("tau_max", "stress_taumax_pa", False),
+        )
+
+        node_stress_series: dict[str, dict[int, np.ndarray]] = {
+            series_name: {
+                int(original_node_id): np.zeros_like(freq_range, dtype=float)
+                for original_node_id in id_map.keys()
+            }
+            for _, series_name, _invert in STRESS_END_FIELDS
         }
         rep_to_originals: dict[int, list[int]] = {}
         for original_node_id, rep_id in id_map.items():
             rep_to_originals.setdefault(int(rep_id), []).append(int(original_node_id))
 
+        element_series: dict[int, dict[str, np.ndarray]] = {
+            element.element_id: {
+                key: np.zeros_like(freq_range, dtype=float)
+                for key in (
+                    "displacement_m_i", "displacement_m_j",
+                    "velocity_m_s_i", "velocity_m_s_j",
+                    "acceleration_m_s2_i", "acceleration_m_s2_j",
+                    *(f"{series_name}_{end}" for _, series_name, _invert in STRESS_END_FIELDS for end in ("i", "j")),
+                )
+            }
+            for element in structure.elements
+        }
+
         # Esfuerzo alternante por nodo = envolvente máxima de los extremos de elementos conectados.
+        # Además, se conserva el resultado propio de cada elemento (sin colapsar a envolvente nodal).
         for freq_idx in range(len(freq_range)):
             u_full = full_complex_responses[freq_idx, :]
             for element in structure.elements:
                 element_u = u_full[element.dof_indices]
-                end_stresses = _compute_element_harmonic_stress_amplitudes(element, element_u)
+                is_massless = _is_massless_link(element)
+                # Enlace rigido sin masa: no aporta "temperatura" de esfuerzo propia.
+                # La carga que transporta ya se refleja en los elementos reales
+                # conectados al mismo nodo (metodo de rigidez estandar) — no hay
+                # nada que transferir a mano, solo evitar reportar su artefacto.
+                zero_end = {key: 0.0 for key, _, _invert in STRESS_END_FIELDS}
+                end_i, end_j = (zero_end, zero_end) if is_massless else _compute_element_harmonic_stress_amplitudes(element, element_u)
+
+                disp_i = float(np.sqrt(np.sum(np.abs(element_u[0:3]) ** 2)))
+                disp_j = float(np.sqrt(np.sum(np.abs(element_u[6:9]) ** 2)))
+                es = element_series[element.element_id]
+                es["displacement_m_i"][freq_idx] = disp_i
+                es["displacement_m_j"][freq_idx] = disp_j
+                es["velocity_m_s_i"][freq_idx] = omega[freq_idx] * disp_i
+                es["velocity_m_s_j"][freq_idx] = omega[freq_idx] * disp_j
+                es["acceleration_m_s2_i"][freq_idx] = (omega[freq_idx] ** 2) * disp_i
+                es["acceleration_m_s2_j"][freq_idx] = (omega[freq_idx] ** 2) * disp_j
+                for stress_key, series_name, _invert in STRESS_END_FIELDS:
+                    es[f"{series_name}_i"][freq_idx] = end_i[stress_key]
+                    es[f"{series_name}_j"][freq_idx] = end_j[stress_key]
+
+                if is_massless:
+                    continue
+
                 for node_idx, rep_node_id in enumerate([element.nodes[0].id, element.nodes[1].id]):
+                    end_values = (end_i, end_j)[node_idx]
                     for original_node_id in rep_to_originals.get(int(rep_node_id), []):
-                        node_stress_series[original_node_id][freq_idx] = max(
-                            node_stress_series[original_node_id][freq_idx],
-                            end_stresses[node_idx],
-                        )
-        
+                        for stress_key, series_name, invert in STRESS_END_FIELDS:
+                            series = node_stress_series[series_name][original_node_id]
+                            candidate = -end_values[stress_key] if invert else end_values[stress_key]
+                            series[freq_idx] = max(series[freq_idx], candidate)
+
         results = {
             "frequencies_sweep": _to_list(freq_range),
             "response_amplitudes": {},
             "node_response_series": {},
             "node_displacement_components": {},
             "node_peak_summary": {},
+            "element_response_series": {
+                element_id: {key: _to_list(arr) for key, arr in metrics.items()}
+                for element_id, metrics in element_series.items()
+            },
             "peak_node_id": None,
             "peak_frequency": None,
             "peak_amplitude": None,
@@ -991,13 +1187,18 @@ def run_harmonic_analysis(request_data: dict) -> dict:
                 node_free_indices = free_index_lookup[node_dofs]
                 valid_indices = node_free_indices[node_free_indices >= 0]
                 node_complex = full_complex_responses[:, node_dofs]
+                # Rotacionales tambien, solo para poder reusar generate_results_figure
+                # (necesita rx,ry,rz reales para la curva de flexion Hermite) — no
+                # entran en disp_mag/vel/acel, esos siguen siendo solo traslacionales.
+                node_rot_complex = full_complex_responses[:, node_core.dofs[3:6]]
                 if valid_indices.size > 0:
                     disp_mag = np.sqrt(np.sum(np.abs(node_complex) ** 2, axis=1))
                 else:
                     disp_mag = np.zeros_like(freq_range, dtype=float)
                 vel_mag = omega * disp_mag
                 acc_mag = (omega**2) * disp_mag
-                stress_mag = node_stress_series.get(int(original_node_id), np.zeros_like(freq_range, dtype=float))
+                zero_freq_array = np.zeros_like(freq_range, dtype=float)
+                stress_mag = node_stress_series["stress_pa"].get(int(original_node_id), zero_freq_array)
 
                 results["response_amplitudes"][original_node_id] = _to_list(disp_mag)
                 results["node_response_series"][original_node_id] = {
@@ -1005,6 +1206,14 @@ def run_harmonic_analysis(request_data: dict) -> dict:
                     "velocity_m_s": _to_list(vel_mag),
                     "acceleration_m_s2": _to_list(acc_mag),
                     "stress_pa": _to_list(stress_mag),
+                    # Circulo de Mohr por nodo (envolvente entre extremos conectados,
+                    # mismo criterio que stress_pa/Von Mises).
+                    "stress_normal_pa": _to_list(node_stress_series["stress_normal_pa"].get(int(original_node_id), zero_freq_array)),
+                    "stress_shear_pa": _to_list(node_stress_series["stress_shear_pa"].get(int(original_node_id), zero_freq_array)),
+                    "stress_sigma1_pa": _to_list(node_stress_series["stress_sigma1_pa"].get(int(original_node_id), zero_freq_array)),
+                    # sigma_2 se acumulo invertido (ver STRESS_END_FIELDS): des-invertir aca.
+                    "stress_sigma2_pa": _to_list(-node_stress_series["stress_sigma2_pa"].get(int(original_node_id), zero_freq_array)),
+                    "stress_taumax_pa": _to_list(node_stress_series["stress_taumax_pa"].get(int(original_node_id), zero_freq_array)),
                 }
                 results["node_displacement_components"][original_node_id] = {
                     "ux_real_m": _to_list(np.real(node_complex[:, 0])),
@@ -1013,6 +1222,12 @@ def run_harmonic_analysis(request_data: dict) -> dict:
                     "uy_imag_m": _to_list(np.imag(node_complex[:, 1])),
                     "uz_real_m": _to_list(np.real(node_complex[:, 2])),
                     "uz_imag_m": _to_list(np.imag(node_complex[:, 2])),
+                    "rx_real_rad": _to_list(np.real(node_rot_complex[:, 0])),
+                    "rx_imag_rad": _to_list(np.imag(node_rot_complex[:, 0])),
+                    "ry_real_rad": _to_list(np.real(node_rot_complex[:, 1])),
+                    "ry_imag_rad": _to_list(np.imag(node_rot_complex[:, 1])),
+                    "rz_real_rad": _to_list(np.real(node_rot_complex[:, 2])),
+                    "rz_imag_rad": _to_list(np.imag(node_rot_complex[:, 2])),
                 }
 
                 finite_mask = np.isfinite(disp_mag)
