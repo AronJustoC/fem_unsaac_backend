@@ -128,6 +128,10 @@ class HarmonicResults(BaseModel):
         default_factory=dict,
         description="Componentes complejas de desplazamiento translacional por nodo para animar la respuesta armonica",
     )
+    element_response_series: dict[int, dict[str, list[float]]] = Field(
+        default_factory=dict,
+        description="Series por elemento (extremos i/j): desplazamiento, velocidad, aceleración y esfuerzo alternante",
+    )
     node_peak_summary: dict[int, dict[str, float]] = Field(
         default_factory=dict,
         description="Resumen por nodo en la frecuencia de pico de desplazamiento y pico de esfuerzo",

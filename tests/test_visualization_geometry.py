@@ -113,7 +113,9 @@ def test_results_view_uses_solid_as_transparent_reference():
     mesh = next(trace for trace in figure.data if isinstance(trace, go.Mesh3d))
 
     assert mesh.opacity == pytest.approx(0.15)
-    assert mesh.showlegend is False
+    # La entrada de leyenda se conserva (heredada de generate_structure_figure) para poder
+    # ocultar el sólido de referencia con un click, igual que cualquier otra traza.
+    assert mesh.showlegend is not False
 
 
 @pytest.mark.parametrize(
