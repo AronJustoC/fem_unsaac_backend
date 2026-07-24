@@ -749,22 +749,54 @@ def _build_sparse_heatmap(matrix: sparse.csr_matrix, requested_bins: int) -> dic
     }
 
 
+def _rayleigh_beta_from_first_mode(km_bundle: dict, damping_ratio: float) -> tuple[float, float, float | None]:
+    """alpha, beta, f1_hz de Rayleigh calibrados con la 1ra frecuencia natural —
+    mismo criterio que run_harmonic_analysis, asi la C que se inspecciona es la
+    misma que realmente entra en Z(w) del barrido armonico.
+    """
+    K_full = km_bundle['matrices'][('stiffness', 'full')]
+    M_full = km_bundle['matrices'][('mass', 'full')]
+    structure = km_bundle['structure']
+    freqs, _, _ = modal_analysis(K_full, M_full, structure, num_modes=1, debug=False)
+    f1 = float(freqs[0]) if len(freqs) > 0 else None
+    if f1:
+        omega1 = 2 * np.pi * f1
+        beta = 2 * damping_ratio / omega1
+    else:
+        beta = 0.001
+    return 0.0, beta, f1
+
+
 def get_global_matrix_view(
     bundle: dict,
     matrix_kind: str = 'stiffness',
     matrix_scope: str = 'full',
+    damping_ratio: float = 0.02,
     row_start: int = 0,
     col_start: int = 0,
     window_size: int = 12,
     heatmap_bins: int = 64,
 ) -> dict:
-    """Serializa el mapa completo y una ventana legible de K/M ensamblada."""
-    if matrix_kind not in {'stiffness', 'mass'}:
-        return {'error': "matrix_kind debe ser 'stiffness' o 'mass'."}
+    """Serializa el mapa completo y una ventana legible de K/M/C ensamblada."""
+    if matrix_kind not in {'stiffness', 'mass', 'damping'}:
+        return {'error': "matrix_kind debe ser 'stiffness', 'mass' o 'damping'."}
     if matrix_scope not in {'full', 'free'}:
         return {'error': "matrix_scope debe ser 'full' o 'free'."}
 
-    matrix = bundle['matrices'][(matrix_kind, matrix_scope)]
+    rayleigh_info = None
+    if matrix_kind == 'damping':
+        K = bundle['matrices'][('stiffness', matrix_scope)]
+        M = bundle['matrices'][('mass', matrix_scope)]
+        alpha, beta, f1 = _rayleigh_beta_from_first_mode(bundle, damping_ratio)
+        matrix = rayleigh_damping_matrix(M, K, alpha, beta).tocsr()
+        rayleigh_info = {
+            'damping_ratio': damping_ratio,
+            'rayleigh_alpha': alpha,
+            'rayleigh_beta': beta,
+            'first_natural_frequency_hz': f1,
+        }
+    else:
+        matrix = bundle['matrices'][(matrix_kind, matrix_scope)]
     dimension = matrix.shape[0]
     size = max(6, min(int(window_size), 36, max(dimension, 6)))
     size = min(size, dimension) if dimension else 0
@@ -787,6 +819,7 @@ def get_global_matrix_view(
         'matrix': {
             'kind': matrix_kind,
             'scope': matrix_scope,
+            **({'rayleigh': rayleigh_info} if rayleigh_info else {}),
             **_sparse_matrix_stats(matrix),
         },
         'metadata': bundle['metadata'],
@@ -839,15 +872,8 @@ def build_impedance_matrix_bundle(km_bundle: dict, damping_ratio: float = 0.05) 
     M_full = km_bundle['matrices'][('mass', 'full')]
     K_free = km_bundle['matrices'][('stiffness', 'free')]
     M_free = km_bundle['matrices'][('mass', 'free')]
-    structure = km_bundle['structure']
 
-    freqs, _, _ = modal_analysis(K_full, M_full, structure, num_modes=1, debug=False)
-    if len(freqs) > 0 and freqs[0] > 0:
-        omega1 = 2 * np.pi * freqs[0]
-        beta = 2 * damping_ratio / omega1
-    else:
-        beta = 0.001
-    alpha = 0.0
+    alpha, beta, f1 = _rayleigh_beta_from_first_mode(km_bundle, damping_ratio)
 
     C_full = rayleigh_damping_matrix(M_full, K_full, alpha, beta).tocsr()
     C_free = rayleigh_damping_matrix(M_free, K_free, alpha, beta).tocsr()
@@ -858,7 +884,7 @@ def build_impedance_matrix_bundle(km_bundle: dict, damping_ratio: float = 0.05) 
         'damping_ratio': damping_ratio,
         'rayleigh_alpha': alpha,
         'rayleigh_beta': beta,
-        'first_natural_frequency_hz': float(freqs[0]) if len(freqs) > 0 else None,
+        'first_natural_frequency_hz': f1,
     }
 
 

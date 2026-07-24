@@ -181,8 +181,9 @@ class ElementMatricesRequest(BaseModel):
 
 class GlobalMatrixViewRequest(BaseModel):
     structure: StructureInput
-    matrix_kind: Literal['stiffness', 'mass'] = 'stiffness'
+    matrix_kind: Literal['stiffness', 'mass', 'damping'] = 'stiffness'
     matrix_scope: Literal['full', 'free'] = 'full'
+    damping_ratio: float = Field(0.02, ge=0, description="Solo aplica si matrix_kind='damping' (Rayleigh, calibrado con la 1ra frecuencia natural)")
     row_start: int = Field(0, ge=0)
     col_start: int = Field(0, ge=0)
     window_size: int = Field(12, ge=6, le=36)
@@ -339,6 +340,7 @@ async def global_matrices(request: GlobalMatrixViewRequest):
         bundle,
         matrix_kind=request.matrix_kind,
         matrix_scope=request.matrix_scope,
+        damping_ratio=request.damping_ratio,
         row_start=request.row_start,
         col_start=request.col_start,
         window_size=request.window_size,
