@@ -449,54 +449,259 @@ def add_nodes_to_figure(fig, nodes, node_fill, node_border):
         ))
 
 
-def add_supports_to_figure(fig, structure_data, nodes, node_border):
+_DOF_ORDER = ['ux', 'uy', 'uz', 'rx', 'ry', 'rz']
+_DOF_LABELS = {
+    'ux': 'Traslación X', 'uy': 'Traslación Y', 'uz': 'Traslación Z',
+    'rx': 'Rotación X', 'ry': 'Rotación Y', 'rz': 'Rotación Z',
+}
+
+
+def _classify_restraint(dofs_set):
+    """Clasifica un apoyo según sus GDL restringidos.
+
+    Empotrado: las 3 traslaciones fijas Y al menos 1 rotación fija — apoyo
+    real con restricción de momento, sea parcial (5 GDL) o total (6 GDL). Un
+    nodo con 5/6 restringidos sigue siendo, en la práctica, un empotramiento
+    (casi) total: no tiene sentido dibujarlo como si fuera un caso raro.
+    Articulado: las 3 traslaciones fijas, rotación 100% libre. Deslizante:
+    restringe 1-2 traslaciones, permite desplazamiento en las direcciones
+    libres. Rotación: NO restringe ninguna traslación, solo alguna rotación —
+    esto no es un apoyo físico real, es la restricción numérica que suelen
+    llevar los nodos internos de una armadura (sus barras no tienen rigidez a
+    flexión, así que el giro del nodo no aporta nada al modelo y se fija para
+    evitar una matriz singular). Mezclado: cualquier otra combinación atípica.
+    """
+    translations = {d for d in dofs_set if d in ('ux', 'uy', 'uz')}
+    rotations = {d for d in dofs_set if d in ('rx', 'ry', 'rz')}
+
+    if translations == {'ux', 'uy', 'uz'}:
+        return 'fixed' if rotations else 'pinned'
+    if 1 <= len(translations) <= 2 and not rotations:
+        return 'roller'
+    if not translations and rotations:
+        return 'rotation_only'
+    return 'other'
+
+
+def _support_scale(nodes, max_section_dim=0.0):
+    """Tamaño físico (mm) de los símbolos de apoyo, proporcional a la estructura.
+
+    Un marker Scatter3d se mide en pixeles de pantalla, no en mm: al hacer zoom
+    queda gigante o desaparece. Estos símbolos son geometría real (Mesh3d/Cone)
+    en las mismas unidades que la estructura, así mantienen su proporción real
+    sin importar el zoom o la escala del modelo.
+
+    El tamaño no puede depender solo de la longitud total de la estructura: un
+    perfil H420x180 es más ancho que un símbolo calculado solo por el vano, y
+    el apoyo termina enterrado dentro del sólido de la barra, invisible. Por
+    eso el piso real es 1.6x la dimensión más grande de cualquier sección del
+    modelo — así el símbolo siempre sobresale por fuera de la barra más gruesa.
+    """
+    if not nodes:
+        return 60.0
+    all_coords = np.array([n['coords'] for n in nodes])
+    span = np.max(all_coords, axis=0) - np.min(all_coords, axis=0)
+    max_dim = max(float(np.max(span)), 1.0)
+    span_based = max(max_dim * 0.035, 35.0)
+    return max(span_based, max_section_dim * 1.6)
+
+
+_AXIS_VEC = {
+    'ux': np.array([1.0, 0.0, 0.0]), 'uy': np.array([0.0, 1.0, 0.0]), 'uz': np.array([0.0, 0.0, 1.0]),
+    'rx': np.array([1.0, 0.0, 0.0]), 'ry': np.array([0.0, 1.0, 0.0]), 'rz': np.array([0.0, 0.0, 1.0]),
+}
+
+
+def _perp_basis(axis):
+    """Dos vectores unitarios perpendiculares a `axis`, para orientar un disco/cilindro."""
+    axis = axis / np.linalg.norm(axis)
+    helper = np.array([0.0, 0.0, 1.0]) if abs(axis[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
+    local_y = np.cross(helper, axis)
+    local_y /= np.linalg.norm(local_y)
+    local_z = np.cross(axis, local_y)
+    return local_y, local_z
+
+
+def _primary_restrained_axis(dofs_set):
+    """Eje "hacia abajo" del símbolo: preferimos Z (como en el plano X-Z clásico
+    de SAP2000), si no está restringido usamos el primer eje que sí lo esté."""
+    for d in ('uz', 'uy', 'ux'):
+        if d in dofs_set:
+            return _AXIS_VEC[d]
+    return _AXIS_VEC['uz']
+
+
+def _roller_slide_axis(dofs_set):
+    """Eje de traslación LIBRE del rodillo — la dirección real en la que el
+    apoyo puede deslizar. El triángulo+círculo se dibuja abierto en este eje
+    (no en una perpendicular cualquiera), para que la orientación del símbolo
+    coincida con hacia dónde se mueve la estructura, no sea arbitraria."""
+    translations = {d for d in dofs_set if d in ('ux', 'uy', 'uz')}
+    free = [d for d in ('ux', 'uy', 'uz') if d not in translations]
+    return _AXIS_VEC[free[0]] if free else _AXIS_VEC['ux']
+
+
+def _new_line_coords():
+    return {'x': [], 'y': [], 'z': [], 'text': []}
+
+
+def _add_edge(coords, a, b, hover_text):
+    coords['x'] += [a[0], b[0], None]
+    coords['y'] += [a[1], b[1], None]
+    coords['z'] += [a[2], b[2], None]
+    coords['text'] += [hover_text, hover_text, None]
+
+
+def _append_triangle_wireframe(coords, center, axis, spread, size, hover_text):
+    """Triángulo de alambre con vértice EN el nodo — el símbolo de apoyo
+    tal como lo dibuja SAP2000 en su vista X-Z: un triángulo apoyado en el
+    nodo, sin base rellena. `spread` da la dirección del ancho de la base
+    (perpendicular a `axis`), para poder cruzar dos triángulos ortogonales."""
+    apex = np.array(center)
+    base_l = apex - axis * size + spread * (size * 0.5)
+    base_r = apex - axis * size - spread * (size * 0.5)
+    _add_edge(coords, apex, base_l, hover_text)
+    _add_edge(coords, apex, base_r, hover_text)
+    _add_edge(coords, base_l, base_r, hover_text)
+
+
+def _append_double_triangle_wireframe(coords, center, axis, size, hover_text):
+    """Empotrado: dos triángulos ortogonales entre sí (mismo vértice, mismo
+    eje, bases cruzadas en cuadratura) — la versión "pirámide" de 4 caras
+    del símbolo de apoyo, para fijar los 6 GDL en vez de solo 3."""
+    local_y, local_z = _perp_basis(axis)
+    _append_triangle_wireframe(coords, center, axis, local_y, size, hover_text)
+    _append_triangle_wireframe(coords, center, axis, local_z, size, hover_text)
+
+
+def _append_ring_wireframe(coords, center, axis, radius, hover_text, segments=24):
+    """Anillo de alambre — la "ruedita" del rodillo. Su normal es `axis`, así
+    que el círculo queda tendido en el plano donde el apoyo SÍ puede deslizar.
+    `center` ya es el punto exacto donde va el anillo — no se vuelve a
+    desplazar acá, para poder ubicarlo con precisión (p. ej. adentro del
+    triángulo, alineado al nodo)."""
+    local_y, local_z = _perp_basis(axis)
+    center = np.array(center)
+    ring = [
+        center + local_y * (radius * np.cos(t)) + local_z * (radius * np.sin(t))
+        for t in np.linspace(0, 2 * np.pi, segments + 1)
+    ]
+    for a, b in zip(ring[:-1], ring[1:]):
+        _add_edge(coords, a, b, hover_text)
+
+
+def _append_axis_cross(coords, center, axis, length, hover_text):
+    """Segmento corto a lo largo de `axis`, atravesando el nodo: marca un eje
+    restringido en su propia dirección real, no en un eje global arbitrario."""
+    half = length / 2.0
+    a = np.array(center) - axis * half
+    b = np.array(center) + axis * half
+    _add_edge(coords, a, b, hover_text)
+
+
+def add_supports_to_figure(fig, structure_data, nodes, node_border, max_section_dim=0.0):
     node_map = {n['id']: n for n in nodes}
     restraints = structure_data.get('restraints', {})
 
-    support_styles = {
-        'fixed': {'symbol': 'square', 'color': '#00ff00', 'name': 'Empotrado'},
-        'pinned': {'symbol': 'triangle-up', 'color': '#00ff00', 'name': 'Articulado'},
-        'other': {'symbol': 'circle', 'color': '#00ff00', 'name': 'Restricción'}
+    support_names = {
+        'fixed': 'Empotrado',
+        'pinned': 'Articulado',
+        'roller': 'Deslizante',
+        'rotation_only': 'Restricción rotacional',
+        'other': 'Restricción parcial',
+    }
+    support_colors = {
+        'fixed': '#808080',
+        'pinned': '#ff1493',
+        'roller': '#ff0000',
+        'rotation_only': '#4a90a4',
+        'other': '#2ecc71',
     }
 
-    support_data = {k: {'x': [], 'y': [], 'z': [], 'text': []} for k in support_styles}
+    supports_by_type = {k: [] for k in support_names}
 
     for nid_str, dofs in restraints.items():
         node = node_map.get(int(nid_str))
         if not node: continue
 
-        dofs_set = set(dofs)
-        if len(dofs_set) >= 6:
-            k = 'fixed'
-        elif all(d in dofs_set for d in ['TX', 'TY', 'TZ']):
-            k = 'pinned'
+        dofs_set = {d.lower() for d in dofs}
+        k = _classify_restraint(dofs_set)
+
+        unique_dofs = sorted(dofs_set, key=lambda x: _DOF_ORDER.index(x) if x in _DOF_ORDER else 99)
+        dof_desc = ', '.join(_DOF_LABELS.get(d, d) for d in unique_dofs)
+        hover_text = f"<b>Nodo {nid_str}</b><br>{support_names[k]}<br>GDL restringidos: {dof_desc}"
+        supports_by_type[k].append((node['coords'], hover_text, dofs_set))
+
+    size = _support_scale(nodes, max_section_dim=max_section_dim)
+
+    # Alambre fino (Scatter3d 'lines'), no Mesh3d sólido: no compite en volumen
+    # con la barra (que puede ser mucho más ancha que el símbolo) y se ve
+    # siempre por encima, nunca "enterrado" dentro de la sección del perfil.
+    for k, entries in supports_by_type.items():
+        if not entries:
+            continue
+        color = support_colors[k]
+        name = support_names[k]
+        legendgroup = f'sup_{k}'
+        coords = _new_line_coords()
+
+        if k == 'fixed':
+            # Empotrado: la misma familia visual que el pin, pero con DOS
+            # triángulos ortogonales (mismo vértice) en vez de uno solo —
+            # como una pirámide de 4 caras: fija los 6 GDL, no solo 3.
+            for node_coords, hover_text, dofs_set in entries:
+                tri_axis = _primary_restrained_axis(dofs_set)
+                _append_double_triangle_wireframe(coords, node_coords, tri_axis, size, hover_text)
+            width, opacity = 3.5, 1.0
+        elif k == 'pinned':
+            # Triángulo apoyado, sin nada debajo: fija las 3 traslaciones,
+            # libera la rotación — igual que el pin de SAP2000.
+            for node_coords, hover_text, dofs_set in entries:
+                tri_axis = _primary_restrained_axis(dofs_set)
+                local_y, _ = _perp_basis(tri_axis)
+                _append_triangle_wireframe(coords, node_coords, tri_axis, local_y, size, hover_text)
+            width, opacity = 3.5, 1.0
+        elif k == 'roller':
+            # Mismo triángulo que el pin, con la "ruedita" ADENTRO, en el MISMO
+            # plano que el triángulo (no perpendicular): así el círculo toca
+            # el nodo por un lado Y la base del triángulo por el otro, siempre,
+            # sin importar el ángulo de cámara. El triángulo se abre en el eje
+            # LIBRE real (no una perpendicular arbitraria): el símbolo entero
+            # queda orientado hacia donde el apoyo puede deslizar.
+            for node_coords, hover_text, dofs_set in entries:
+                tri_axis = _primary_restrained_axis(dofs_set)
+                spread = _roller_slide_axis(dofs_set)
+                _append_triangle_wireframe(coords, node_coords, tri_axis, spread, size, hover_text)
+                wheel_radius = size * 0.5
+                wheel_center = np.array(node_coords) - tri_axis * wheel_radius
+                ring_normal = np.cross(tri_axis, spread)
+                _append_ring_wireframe(coords, wheel_center, ring_normal, wheel_radius, hover_text)
+            width, opacity = 3.5, 1.0
         else:
-            k = 'other'
+            # "rotation_only" es la restricción numérica típica de nodos internos
+            # de armadura (sin rigidez a flexión, no es un apoyo físico real):
+            # se dibuja bien chica y translúcida para no competir con la estructura.
+            is_rotation_only = k == 'rotation_only'
+            rod_length = size * (0.4 if is_rotation_only else 0.7)
+            width, opacity = (1.5, 0.5) if is_rotation_only else (2.5, 0.85)
+            for node_coords, hover_text, dofs_set in entries:
+                for d in dofs_set:
+                    axis = _AXIS_VEC.get(d)
+                    if axis is None:
+                        continue
+                    _append_axis_cross(coords, node_coords, axis, rod_length, hover_text)
 
-        support_data[k]['x'].append(node['coords'][0])
-        support_data[k]['y'].append(node['coords'][1])
-        support_data[k]['z'].append(node['coords'][2])
-        unique_dofs = sorted(list(set(dofs)), key=lambda x: ['ux', 'uy', 'uz', 'rx', 'ry', 'rz'].index(
-            x) if x in ['ux', 'uy', 'uz', 'rx', 'ry', 'rz'] else 99)
-        support_data[k]['text'].append(f"Nodo {nid_str}<br>{', '.join(unique_dofs)}")
-
-    for k, style in support_styles.items():
-        data = support_data[k]
-        if data['x']:
-            fig.add_trace(go.Scatter3d(
-                x=data['x'], y=data['y'], z=data['z'],
-                mode='markers',
-                marker=dict(
-                    size=6,
-                    color=style['color'],
-                    symbol=style['symbol'],
-                    line=dict(color=node_border, width=1),
-                    opacity=1.0
-                ),
-                text=data['text'],
-                name=style['name'],
-                hoverinfo='text'
-            ))
+        fig.add_trace(go.Scatter3d(
+            x=coords['x'], y=coords['y'], z=coords['z'],
+            mode='lines',
+            line=dict(color=color, width=width),
+            opacity=opacity,
+            name=name,
+            legendgroup=legendgroup,
+            showlegend=True,
+            text=coords['text'],
+            hovertemplate='%{text}<extra></extra>',
+        ))
 
 
 def add_loads_to_figure(fig, structure_data, nodes):
@@ -638,7 +843,7 @@ def apply_layout_config(fig, nodes, cfg):
         showgrid=True,
         color=text_color,
         showbackground=True,
-        backgroundcolor='rgba(0,0,0,0.01)' if is_dark else 'rgba(0,0,0,0.005)',
+        backgroundcolor='rgba(0,0,0,0.01)' if is_dark else 'rgba(0,0,0,0)',
         gridwidth=1.0,
         showspikes=False
     )
@@ -684,7 +889,11 @@ def generate_structure_figure(structure_data, theme="dark"):
     
     add_elements_to_figure(fig, structure_data.get('elements', []), nodes, materials, sections, cfg['palette'])
     add_nodes_to_figure(fig, nodes, cfg['node_fill'], cfg['node_border'])
-    add_supports_to_figure(fig, structure_data, nodes, cfg['node_border'])
+    max_section_dim = max(
+        (max(_section_geometry(s)['height'], _section_geometry(s)['width']) for s in sections.values()),
+        default=0.0,
+    )
+    add_supports_to_figure(fig, structure_data, nodes, cfg['node_border'], max_section_dim=max_section_dim)
     add_loads_to_figure(fig, structure_data, nodes)
     apply_layout_config(fig, nodes, cfg)
 
