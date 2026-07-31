@@ -967,11 +967,12 @@ def run_harmonic_analysis(request_data: dict) -> dict:
         freq_start = float(request_data.get('freq_start', 0.1))
         freq_end = float(request_data.get('freq_end', 100.0))
         num_points = int(request_data.get('num_points', 100))
-        damping_ratio = float(request_data.get('damping_ratio', 0.05))
+        damping_ratio = float(request_data.get('damping_ratio', 0.04))
         is_unbalanced = bool(request_data.get('is_unbalanced', False))
         unbalanced_me = float(request_data.get('unbalanced_me', 0.0))
         unbalanced_node_id = request_data.get('unbalanced_node_id')
         unbalanced_direction = request_data.get('unbalanced_direction') or [0.0, 1.0, 0.0]
+        unbalanced_plane = str(request_data.get('unbalanced_plane') or 'direction').lower()
         unbalanced_mass = float(request_data.get('unbalanced_mass') or 0.0)
         unbalanced_eccentricity = float(request_data.get('unbalanced_eccentricity') or 0.0)
         mass_type = structure_data.get('settings', {}).get('mass_type', 'lumped')
@@ -1030,7 +1031,7 @@ def run_harmonic_analysis(request_data: dict) -> dict:
         # - Fuerza por desbalance nueva: el usuario define nodo + dirección + m + e.
         # - Fuerza por desbalance legacy: las cargas del editor definen la dirección y
         #   la magnitud se calcula con unbalanced_me * ω².
-        F_amplitude = np.zeros(structure.num_dofs)
+        F_amplitude = np.zeros(structure.num_dofs, dtype=np.complex128)
         dof_map = {"fx": 0, "fy": 1, "fz": 2, "mx": 3, "my": 4, "mz": 5}
 
         if has_explicit_unbalance:
@@ -1043,18 +1044,29 @@ def run_harmonic_analysis(request_data: dict) -> dict:
             if rep_id is None or rep_id not in nodes_map_core:
                 return {"error": f"El nodo de desbalance {selected_node_id} no existe o no pertenece a la estructura analizada."}
 
-            try:
-                direction = np.array(unbalanced_direction, dtype=float).reshape(-1)
-            except (TypeError, ValueError):
-                return {"error": "La dirección del desbalance debe tener componentes numéricas [x, y, z]."}
-
-            if direction.size != 3 or np.linalg.norm(direction) <= 1e-12:
-                return {"error": "La dirección del desbalance debe ser un vector translacional no nulo [x, y, z]."}
-
-            direction = direction / np.linalg.norm(direction)
             node_core = nodes_map_core[rep_id]
-            for dof_idx, value in enumerate(direction):
-                F_amplitude[node_core.dofs[dof_idx]] = value
+            plane_axes = {"xy": (0, 1), "xz": (0, 2), "yz": (1, 2)}
+            if unbalanced_plane in plane_axes:
+                axis_cos, axis_sin = plane_axes[unbalanced_plane]
+                # Con la convención Re(F·e^(iωt)): 1 genera cos(ωt) y -i genera
+                # sin(ωt). Cada componente conserva amplitud me·ω², por lo que la
+                # resultante instantánea rota con magnitud constante me·ω².
+                F_amplitude[node_core.dofs[axis_cos]] = 1.0 + 0.0j
+                F_amplitude[node_core.dofs[axis_sin]] = 0.0 - 1.0j
+            elif unbalanced_plane == "direction":
+                try:
+                    direction = np.array(unbalanced_direction, dtype=float).reshape(-1)
+                except (TypeError, ValueError):
+                    return {"error": "La dirección del desbalance debe tener componentes numéricas [x, y, z]."}
+
+                if direction.size != 3 or np.linalg.norm(direction) <= 1e-12:
+                    return {"error": "La dirección del desbalance debe ser un vector translacional no nulo [x, y, z]."}
+
+                direction = direction / np.linalg.norm(direction)
+                for dof_idx, value in enumerate(direction):
+                    F_amplitude[node_core.dofs[dof_idx]] = value
+            else:
+                return {"error": "El plano de giro debe ser uno de: xy, xz, yz o direction."}
         else:
             for load_data in loads:
                 original_node_id = load_data.get('node_id')
@@ -1081,7 +1093,9 @@ def run_harmonic_analysis(request_data: dict) -> dict:
             force_norm = np.linalg.norm(F_amplitude)
             if force_norm <= 1e-12:
                 return {"error": "El análisis armónico por desbalance requiere una dirección no nula para definir la excitación."}
-            solver_force = F_amplitude / force_norm
+            # Un fasor rotativo posee dos componentes unitarias en cuadratura.
+            # Normalizar su norma sqrt(2) reduciría incorrectamente la fuerza física.
+            solver_force = F_amplitude if unbalanced_plane in {"xy", "xz", "yz"} else F_amplitude / force_norm
 
         F_free = solver_force[free_dofs]
         if np.linalg.norm(F_free) <= 1e-12:

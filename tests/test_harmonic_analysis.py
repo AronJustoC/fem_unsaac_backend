@@ -102,6 +102,34 @@ def test_harmonic_unbalanced_load_uses_selected_node_direction_mass_and_eccentri
     assert result["peak_node_id"] == 2
 
 
+def test_harmonic_rotating_unbalance_in_yz_plane_has_quadrature_components():
+    structure = simple_cantilever_structure()
+    structure["loads"] = []
+
+    result = run_harmonic_analysis(
+        {
+            "structure": structure,
+            "freq_start": 3.0,
+            "freq_end": 12.0,
+            "num_points": 5,
+            "damping_ratio": 0.02,
+            "is_unbalanced": True,
+            "unbalanced_node_id": 2,
+            "unbalanced_plane": "yz",
+            "unbalanced_mass": 0.029,
+            "unbalanced_eccentricity": 0.0508,
+        }
+    )
+
+    assert "error" not in result
+    components = result["node_displacement_components"][2]
+    uy = np.asarray(components["uy_real_m"]) + 1j * np.asarray(components["uy_imag_m"])
+    uz = np.asarray(components["uz_real_m"]) + 1j * np.asarray(components["uz_imag_m"])
+
+    np.testing.assert_allclose(np.abs(uy), np.abs(uz), rtol=1e-9, atol=1e-12)
+    np.testing.assert_allclose(uz, -1j * uy, rtol=1e-9, atol=1e-12)
+
+
 def test_harmonic_unbalanced_load_rejects_zero_direction():
     structure = simple_cantilever_structure()
     structure["loads"] = []

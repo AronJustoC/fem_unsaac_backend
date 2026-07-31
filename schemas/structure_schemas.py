@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Literal, Optional
 from pydantic import BaseModel, Field, ConfigDict
 
 
@@ -146,13 +146,17 @@ class HarmonicAnalysisRequest(BaseModel):
     freq_start: float = Field(0.1, description="Frecuencia inicial del barrido (Hz)")
     freq_end: float = Field(100.0, description="Frecuencia final del barrido (Hz)")
     num_points: int = Field(100, description="Numero de puntos en el barrido")
-    damping_ratio: float = Field(0.05, description="Relación de amortiguamiento (ej, 0.05 para 5%)")
+    damping_ratio: float = Field(0.04, description="Relación de amortiguamiento (ej, 0.04 para 4%)")
     is_unbalanced: bool = Field(False, description="Si es una fuerza de desbalance proporcional a w^2")
     unbalanced_me: float = Field(0.0, description="Producto masa x excentricidad (m*e)")
     unbalanced_node_id: Optional[int] = Field(None, description="Nodo donde se aplica la fuerza de desbalance")
     unbalanced_direction: tuple[float, float, float] = Field(
         (0.0, 1.0, 0.0),
         description="Dirección translacional [x, y, z] de la fuerza de desbalance",
+    )
+    unbalanced_plane: Literal["direction", "xy", "xz", "yz"] = Field(
+        "direction",
+        description="Plano de giro de la masa; 'direction' conserva la excitación lineal legacy",
     )
     unbalanced_mass: float = Field(0.0, description="Masa desbalanceada m (kg)")
     unbalanced_eccentricity: float = Field(0.0, description="Excentricidad e (m)")

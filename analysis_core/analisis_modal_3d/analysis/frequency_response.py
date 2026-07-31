@@ -57,7 +57,7 @@ def direct_frequency_response(
     use_sparse_solver = sp.issparse(K) and num_dofs >= SPARSE_SOLVER_DOF_THRESHOLD
     
     # Normalizar el vector de dirección de la fuerza si es necesario
-    force_direction = np.zeros(num_dofs)
+    force_direction = np.zeros(num_dofs, dtype=np.complex128)
     if is_unbalanced_force:
         if normalize_unbalanced_direction:
             norm = np.linalg.norm(force_vector_amplitude)
@@ -67,7 +67,7 @@ def direct_frequency_response(
                 # Si el vector de fuerza es cero, no hay nada que hacer
                 return np.zeros((num_freqs, num_dofs), dtype=np.complex128)
         else:
-            force_direction = force_vector_amplitude.astype(float, copy=False)
+            force_direction = force_vector_amplitude.astype(np.complex128, copy=False)
             if np.linalg.norm(force_direction) <= 1e-12:
                 return np.zeros((num_freqs, num_dofs), dtype=np.complex128)
     
